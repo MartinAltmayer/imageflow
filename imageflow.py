@@ -15,7 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-import math, functools
+import math, functools, sys
 
 from PyQt4 import QtCore, QtGui, QtSvg
 from PyQt4.QtCore import Qt
@@ -723,16 +723,28 @@ if __name__ == "__main__":
     import os, os.path, argparse
     parser = argparse.ArgumentParser(description="Show the images within one folder in an ImageFlow.")
     parser.add_argument('path', nargs='?', help="Path of the folder, defaults to current directory", default='.')
-    parser.add_argument('--random', help="Shuffle the images.", action="store_true")
+    parser.add_argument('--random', help="Shuffle the images.", action='store_true')
+    parser.add_argument('--no-random', dest='random', action='store_false')
+    parser.add_argument('--rotate', help="Rotate images according to EXIF-data (requires Wand, http://docs.wand-py.org/).", action='store_true')
+    parser.add_argument('--no-rotate', dest='rotate', action='store_false')
+    parser.add_argument('--size', help="Maximal size of central image, e.g. 500x300. A single number can be used as shorthand for a square size.")
+    parser.add_argument('--reflection', help="Add reflection.", action='store_true')
+    parser.add_argument('--no-reflection', dest='reflection', action='store_false')
+    parser.add_argument('--background', help="Background color. Possible values are e.g. 'red', '#a2ee3f'. See http://qt-project.org/doc/qt-4.8/qcolor.html#setNamedColor for all possibilities.")
+    parser.set_defaults(random=False, rotate=True, reflection=True)
     args = parser.parse_args()
     
     app = QtGui.QApplication([])
+    
+    # Load paths
     folder = os.path.abspath(os.path.expanduser(args.path))
     paths = [os.path.join(folder, filename) for filename in os.listdir(folder)]
     paths = [path for path in paths if os.path.splitext(path)[1].lower() in ['.png', '.jpg', '.jpeg', '.bmp']]
     if args.random:
         import random
         random.shuffle(paths)
+       
+    # Create GUI
     widget = QtGui.QWidget()
     widget.setWindowTitle("Image flow")
     widget.resize(1400, 600)
@@ -754,11 +766,33 @@ if __name__ == "__main__":
     configLayout.addWidget(aboutButton)
     layout.addLayout(configLayout)
     imageWidget = ImageFlowWidget()
-    imageWidget.setOption('size', QtCore.QSize(500,500))
     imageWidget.imagePressed.connect(lambda im: print("Pressed on {}".format(im.path)))
     imageWidget.imageDblClicked.connect(lambda im: print("Double clicked on {}".format(im.path)))
-    imageWidget.setPaths(paths)
     layout.addWidget(imageWidget)
+    
+    # Set options
+    imageWidget.setOption('rotate', args.rotate)
+    imageWidget.setOption('reflection', args.reflection)
+    if args.size is not None:
+        numbers = args.size.lower().split('x')
+        if len(numbers) in [1,2] and all(len(n) > 0 for n in numbers) \
+                    and all(c in '0123456789' for c in sum(numbers)):
+            numbers = [max(1, min(int(n), 10000)) for n in numbers]
+            if len(numbers) == 1:
+                numbers *= 2
+            imageWidget.setOption('size', QtCore.QSize(*numbers))
+        else:
+            print("Invalid size.")
+        sys.exit(1)
+    if args.background is not None:
+        color = QtGui.QColor(args.background)
+        if not color.isValid():
+            print("Invalid bachground color.")
+            sys.exit(1)
+        imageWidget.setOption('background', color)
+
+    # Show
+    imageWidget.setPaths(paths)
     widget.show()
     imageWidget.setFocus(Qt.ActiveWindowFocusReason)
     app.exec_()
