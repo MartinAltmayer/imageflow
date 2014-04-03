@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # PyQt ImageFlow
-# Copyright (C) 2013-2014 Martin Altmayer
+# Copyright (C) 2013-2014 Martin Altmayer <altmayer@posteo.de>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -38,6 +38,9 @@ COLORS = [
     (translate("ImageFlow", "Light gray"), QtGui.QColor(0x80, 0x80, 0x80)),
     (translate("ImageFlow", "White"),      QtGui.QColor(0xFF, 0xFF, 0xFF)),
 ]
+
+import time
+times = []
 
 class Image:
     """A single image in the flow. This contains basically a pixmap and the cached version of it (resized to
@@ -195,7 +198,7 @@ class ImageFlowWidget(QtGui.QWidget):
             'curve': state.get('curve', 'arc'),
             'segmentRads': 0.8*math.pi,
             'minScale': 0.3,
-            'vAlign': 0.5 if not state.get('reflection') else 0.7,
+            'vAlign': 0.5,
             'imageVAlign': 0.8,
             'reflection': state.get('reflection', True),
             'reflectionFactor': 0.6,
@@ -239,14 +242,15 @@ class ImageFlowWidget(QtGui.QWidget):
             'rotate': bool,
         }
         changed = []
-        for key, value in options.items(): # update only existing keys
-            if key in self._o:
-                type = types[key]
-                if not isinstance(value, type) and not (type == float and isinstance(value, int)):
-                    raise TypeError("Option '{}' must be of type {}. Received: {}".format(key, type, value))
-                if value != self._o[key]:    
-                    self._o[key] = value
-                    changed.append(key)
+        for key, value in options.items():
+            if key not in self._o:
+                raise KeyError("Invalid option '{}'.".format(key))
+            type = types[key]
+            if not isinstance(value, type) and not (type == float and isinstance(value, int)):
+                raise TypeError("Option '{}' must be of type {}. Received: {}".format(key, type, value))
+            if value != self._o[key]:    
+                self._o[key] = value
+                changed.append(key)
         if any(k in changed for k in ['background', 'size', 'reflection', 'reflectionFactor']):
             for image in self.images:
                 image._clearCache()
@@ -466,31 +470,47 @@ class Renderer:
         dx, dy = self._getTranslation()
         painter.translate(dx, dy)
         centerIndex = max(0, min(round(self.widget._pos), len(self.widget.images)-1))
-        centerRect = self.renderImage(painter, centerIndex)
-        clipRect = QtCore.QRect(-dx, -dy, dx+centerRect.left(), self.buffer.height())
         imagesLeft = imagesRight = o['imagesPerSide']
         if self.widget._pos < round(self.widget._pos):
             imagesLeft += 1
         elif self.widget._pos > round(self.widget._pos):
             imagesRight += 1
-        for i in reversed(range(max(0, centerIndex-imagesLeft), centerIndex)):
-            painter.setClipRect(clipRect)
-            rect = self.renderImage(painter, i)
-            if rect is None:
-                break
-            clipRect.setRight(min(clipRect.right(), rect.left()-1))
-        clipRect = QtCore.QRect(centerRect.right(),
-                                -dy,
-                                self.buffer.width()-centerRect.right(),
-                                self.buffer.height())
-        for i in range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images))):
-            painter.setClipRect(clipRect)
-            rect = self.renderImage(painter, i)
-            if rect is None:
-                break
-            clipRect.setLeft(max(clipRect.left(), rect.right()))
-
+            
+            
+            
+        #if all(self.widget.images[i].pixmap is not None for i in range(max(0,centerIndex-imagesLeft),min(len(self.widget.images), centerIndex+imagesRight+1))):
+            #start = time.perf_counter()
+        #else: start = None
+        
+        for i in range(max(0, centerIndex-imagesLeft), centerIndex):
+           rect = self.renderImage(painter, i)
+        for i in reversed(range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images)))):
+           rect = self.renderImage(painter, i)
+        self.renderImage(painter, centerIndex)
+        
+        #centerIndex = max(0, min(round(self.widget._pos), len(self.widget.images)-1))
+        #centerRect = self.renderImage(painter, centerIndex)
+        #clipRect = QtCore.QRect(-dx, -dy, dx+centerRect.left(), self.buffer.height())
+        #for i in reversed(range(max(0, centerIndex-imagesLeft), centerIndex)):
+            #painter.setClipRect(clipRect)
+            #rect = self.renderImage(painter, i)
+            #if rect is None:
+                #break
+            #clipRect.setRight(min(clipRect.right(), rect.left()-1))
+        #clipRect = QtCore.QRect(centerRect.right(),
+                                #-dy,
+                                #self.buffer.width()-centerRect.right(),
+                                #self.buffer.height())
+        #for i in range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images))):
+            #painter.setClipRect(clipRect)
+            #rect = self.renderImage(painter, i)
+            #if rect is None:
+                #break
+            #clipRect.setLeft(max(clipRect.left(), rect.right()))
         painter.end()
+        #if start is not None:
+            #times.append(time.perf_counter()-start)
+            #print(sum(times)/len(times))
 
     def _getTranslation(self):
         """Return the translation of the coordinate system used for drawing images as (dx, dy)."""
@@ -509,7 +529,7 @@ class Renderer:
         if pixmap is None:
             pixmap = self.widget.images[index].cache(o)
         if pixmap.isNull():
-            return QtCore.QRect(0,0,0,0)
+            return QtCore.QRect()
         
         if index == self.widget.position():
             x = 0
@@ -558,10 +578,14 @@ class Renderer:
         if z > 1:
             z = 1
         scale = o['minScale'] + z * (1.-o['minScale'])
-        # correct vertical align: y + imageVAlign*actualHeight = imageVAlign*maxHeight
-        actualHeight = scale * pixmap.height() / (1+o['reflectionFactor'])
-        y = o['imageVAlign'] * (o['size'].height() - actualHeight)
+        if scale <= 0:
+            return QtCore.QRect()
         
+        # correct vertical align: y + imageVAlign*actualHeight = imageVAlign*maxHeight
+        if o['reflection']:
+            actualHeight = scale * pixmap.height() / (1+o['reflectionFactor'])
+        else: actualHeight = scale * pixmap.height()
+        y = o['imageVAlign'] * (o['size'].height() - actualHeight)
         
         rect = QtCore.QRectF(0, 0, scale*pixmap.width(), scale*pixmap.height())
         rect.translate(x-rect.width()/2, y)
@@ -581,19 +605,20 @@ class Renderer:
         image = self.widget.images[index]
         pixmap = image.cache(self._o)
         if pixmap.isNull():
-            return QtCore.QRect(0,0,0,0)
+            return QtCore.QRect()
         rect = self.imageRect(index, pixmap=pixmap, translate=False)
-        painter.drawPixmap(rect.toRect(), pixmap)
+        if rect.isValid():
+            painter.drawPixmap(rect.toRect(), pixmap)
 
-        if False and self._o['fadeOut']:
-            # Scale x into [-1, 1] (this inverts a scaling in self.imageRect)
-            x = rect.center().x() / self._availableWidth() * 2
-            if abs(x) > self._o['fadeStart']:
-                alpha = round(255 * max(0, 1-(abs(x)-self._o['fadeStart'])))
-                if alpha < 255:
-                    color = QtGui.QColor(self._o['background'])
-                    color.setAlpha(255-alpha)
-                    painter.fillRect(rect, color)
+            if False and self._o['fadeOut']:
+                # Scale x into [-1, 1] (this inverts a scaling in self.imageRect)
+                x = rect.center().x() / self._availableWidth() * 2
+                if abs(x) > self._o['fadeStart']:
+                    alpha = round(255 * max(0, 1-(abs(x)-self._o['fadeStart'])))
+                    if alpha < 255:
+                        color = QtGui.QColor(self._o['background'])
+                        color.setAlpha(255-alpha)
+                        painter.fillRect(rect, color)
             
         return rect
 
@@ -731,6 +756,9 @@ if __name__ == "__main__":
     parser.add_argument('--reflection', help="Add reflection.", action='store_true')
     parser.add_argument('--no-reflection', dest='reflection', action='store_false')
     parser.add_argument('--background', help="Background color. Possible values are e.g. 'red', '#a2ee3f'. See http://qt-project.org/doc/qt-4.8/qcolor.html#setNamedColor for all possibilities.")
+    parser.add_argument('--valign', help="Vertical align of whole image flow. 0=top, 0.5=center, 1=bottom, linear in between.", type=float)
+    parser.add_argument('--imagevalign', help="Vertical align of images within image flow. 0=top, 0.5=center, 1=bottom, linear in between.", type=float)
+    parser.add_argument('--imagesperside', help="How many images should be visible on both sides of the central image?", type=int)
     parser.set_defaults(random=False, rotate=True, reflection=True)
     args = parser.parse_args()
     
@@ -776,21 +804,27 @@ if __name__ == "__main__":
     if args.size is not None:
         numbers = args.size.lower().split('x')
         if len(numbers) in [1,2] and all(len(n) > 0 for n in numbers) \
-                    and all(c in '0123456789' for c in sum(numbers)):
+                    and all(c in '0123456789' for c in ''.join(numbers)):
             numbers = [max(1, min(int(n), 10000)) for n in numbers]
             if len(numbers) == 1:
                 numbers *= 2
             imageWidget.setOption('size', QtCore.QSize(*numbers))
         else:
             print("Invalid size.")
-        sys.exit(1)
+            sys.exit(1)
     if args.background is not None:
         color = QtGui.QColor(args.background)
         if not color.isValid():
             print("Invalid bachground color.")
             sys.exit(1)
         imageWidget.setOption('background', color)
-
+    if args.valign is not None:
+        imageWidget.setOption('vAlign', max(0, min(args.valign, 1)))
+    if args.imagevalign is not None:
+        imageWidget.setOption('imageVAlign', max(0, min(args.imagevalign, 1)))
+    if args.imagesperside is not None: 
+        imageWidget.setOption('imagesPerSide', max(0, min(args.imagesperside, 10)))
+       
     # Show
     imageWidget.setPaths(paths)
     widget.show()
