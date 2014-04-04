@@ -15,7 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-import math, functools, sys
+import math, functools
 
 from PyQt4 import QtCore, QtGui, QtSvg
 from PyQt4.QtCore import Qt
@@ -39,8 +39,56 @@ COLORS = [
     (translate("ImageFlow", "White"),      QtGui.QColor(0xFF, 0xFF, 0xFF)),
 ]
 
-import time
-times = []
+# Available options. Options can be set via ImageFlowWidget.setOption. When this script is executed directly,
+# options can also be given on the command line (try python imageflow.py --help).
+# The tuples in this dict store the option type, default value and a description. Note that format
+# descriptions in the latter only apply to the command line. ImageFlowWidget.setOption expects the type
+# stored in the first tuple entry.
+OPTIONS = {
+    'size': (QtCore.QSize, QtCore.QSize(300, 300),
+             "Maximal size of central image, e.g. 500x300. A single number can be used as shorthand for a "
+             "square size."),
+    'rotate': (bool, True,
+               "Rotate images according to EXIF-data (requires Wand, http://docs.wand-py.org/)."),
+    'imagesPerSide': (int, 5,
+                      "Number of images visible to the left and right of the central image."),
+    'background': (QtGui.QColor, Qt.black,
+                   "Background color. Possible values are e.g. 'red', '#a2ee3f'. "
+                   "See http://qt-project.org/doc/qt-4.8/qcolor.html#setNamedColor for all possibilities."),
+    # The size of images is computed by arranging them (virtually and when seen from above)
+    # on a curve. The central image is "nearest" to the user and will use a scale factor of 1.
+    # The outermost images are "farthest" to the user and will be scaled using MIN_SCALE.
+    'curve': (str, 'arc',
+              "Curve which describes how images become smalle on both sides of the center. "
+              "Possible values: "+','.join("'{}'".format(key) for _, key in CURVES)),
+    'segmentRads': (float, 0.8*math.pi,
+                    "Number in (0, pi]. Only for curve='arc'. Determines the length of the arc segment on "
+                    "which images are positioned. Use π to arrange images on a semicircle."),
+    'minScale': (float, 0.3, 
+                 "Scale factor used for the outermost positions."),
+    'vAlign': (float, 0.5,
+               "Vertical align of whole image flow. 0=top, 0.5=center, 1=bottom, linear in between."),
+    'imageVAlign': (float, 0.8,
+                    "Vertical align of images within image flow. "
+                    "0=top, 0.5=center, 1=bottom, linear in between."),
+    'reflection': (bool, False,
+                   "Add reflection."),
+    'reflectionFactor': (float, 0.6, 
+                         "Between 0 and 1; the higher the more visible is the reflection."),
+    'fadeOut': (bool, True,
+                "Fade out images on both sides."),
+    'fadeStart': (float, 0.4,
+                  "Number in [0, 1]. If fadeOut is True, images will start fading out on both sides at the "
+                  "position specified by fadeStart, i.e. 0 means that all images will fade out, 1 means that "
+                  "only images at the outermost position will fade out."),
+}
+
+
+DEBUG_TIMES = False
+if DEBUG_TIMES:
+    import time
+    _times = []
+
 
 class Image:
     """A single image in the flow. This contains basically a pixmap and the cached version of it (resized to
@@ -48,19 +96,18 @@ class Image:
     may be given. In this case the pixmap will not be loaded until it is visible in the image flow. Also,
     if *rotate* is true (and Wand available) the image will be rotated according to EXIF data.
     """
-    def __init__(self, path=None, pixmap=None, rotate=False):
+    def __init__(self, path=None, pixmap=None):
         if path is None and pixmap is None:
             raise ValueError("Either path or pixmap must be given")
         self.path = path
         self.pixmap = pixmap
-        self.rotate = rotate
         self._cache = None
         
-    def load(self):
+    def load(self, rotate=False):
         """Load the image's pixmap."""
         if self.pixmap is not None:
             return
-        if self.rotate:
+        if rotate:
             try:
                 import wand.image
                 w = wand.image.Image(filename=self.path)
@@ -88,7 +135,7 @@ class Image:
         """Return the cached version of this image. *options* is the set of options
         returned by ImageFlow.options."""
         if self.pixmap is None:
-            self.load()
+            self.load(options['rotate'])
         if self._cache is None:
             self._createCache(options)
         return self._cache
@@ -143,43 +190,11 @@ class Image:
 
 
 class ImageFlowWidget(QtGui.QWidget):
-    """
-    Options:
-    
-    background: QColor to fill the background.
-    size: QSize. The maximum size of the central image.
-    imagesPerSide: int. Number of images visible to the left and right of the central image.
-    curve: string. The size of images is computed by arranging them (virtually and when seen from above)
-           on a curve. The central image is "nearest" to the user and will use a scale factor of 1.
-           The outermost images are "farthest" to the user and will be scaled using MIN_SCALE.
-           One of:
-                "arc" arc segment,
-                "v": v-shape/abs function,
-                "cos": cos function,
-                "cossqrt": cos curve differently parametrized,
-                "peak": peak build of two parabel halves,
-                "gallery": show all images at MIN_SCALE except the central one.
-    segmentRads: float in (0, pi]. Only for curve=="arc". Determines the length of the arc segment on which
-                 images are positioned. Use π to arrange images on a semicircle.
-    minScale: float in (0, 1]. Scale factor used for the outermost positions.
-    vAlign: float in [0,1]. Vertical align of whole imageflow (or equivalently the central image).
-            0: top, 1: bottom, linear in between (0.5: centered).
-    imageVAlign: float in [0,1]. Vertical align of images among each other.
-                 0: the top edge is aligned, 1: the bottom edge is aligned, linear in between.
-    reflection: bool. Enable/disable reflection.
-    reflectionFactor: float in [0,1]. Ratio of reflection height divided by image height
-    fadeOut: bool. Fade out images on both sides.
-    fadeStart: float in [0, 1]. If fadeOut is True, images will start fading out on both sides at the 
-               position specified by fadeStart, i.e. 0 means that all images will fade out, 1 means that
-               only images at the outermost position will fade out.
-    rotate: bool. If true, read EXIF-data to rotate images.
-            Requires the Wand library (http://docs.wand-py.org/) and might be slow.
-    """
     indexChanged = QtCore.pyqtSignal(int)
     imagePressed = QtCore.pyqtSignal(Image)
     imageDblClicked = QtCore.pyqtSignal(Image)
     
-    def __init__(self, state=None, parent=None):
+    def __init__(self, data=None, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
@@ -187,25 +202,9 @@ class ImageFlowWidget(QtGui.QWidget):
         
         self.images = []
         self._pos = 0     
-        if state is None:
-            state = {}   
-        self._o = {
-            'background': QtGui.QColor(*state['background']) \
-                        if 'background' in state else QtGui.QColor(0,0,0),
-            'size': QtCore.QSize(state['size'][0], state['size'][1]) \
-                        if 'size' in state else QtCore.QSize(300, 300),
-            'imagesPerSide': state.get('imagesPerSide', 5),
-            'curve': state.get('curve', 'arc'),
-            'segmentRads': 0.8*math.pi,
-            'minScale': 0.3,
-            'vAlign': 0.5,
-            'imageVAlign': 0.8,
-            'reflection': state.get('reflection', True),
-            'reflectionFactor': 0.6,
-            'fadeOut': state.get('fadeOut', True),
-            'fadeStart': 0.4,
-            'rotate': False,
-        }
+        self._o = {option: default for option, (optionType, default, _) in OPTIONS.items()}
+        if data is not None:
+            self.loadData(data)
         
         self.renderer = Renderer(self)
         self.animator = Animator(self)
@@ -226,28 +225,15 @@ class ImageFlowWidget(QtGui.QWidget):
     def setOptions(self, options):
         """Set several options: *options* must be a dict mapping option keys to values. Options which are
         not contained in *options* remain unchanged."""
-        types = {
-            'background': QtGui.QColor,
-            'size': QtCore.QSize,
-            'imagesPerSide': int,
-            'curve': str,
-            'segmentRads': float,
-            'minScale': float,
-            'vAlign': float,
-            'imageVAlign': float,
-            'reflection': bool,
-            'reflectionFactor': float,
-            'fadeOut': bool,
-            'fadeStart': float,
-            'rotate': bool,
-        }
+
         changed = []
         for key, value in options.items():
-            if key not in self._o:
+            if key not in OPTIONS:
                 raise KeyError("Invalid option '{}'.".format(key))
-            type = types[key]
-            if not isinstance(value, type) and not (type == float and isinstance(value, int)):
-                raise TypeError("Option '{}' must be of type {}. Received: {}".format(key, type, value))
+            optionType = OPTIONS[key][0]
+            if not isinstance(value, optionType) and not (optionType == float and isinstance(value, int)):
+                raise TypeError("Option '{}' must be of type {}. Received: {}"
+                                .format(key, optionType, value))
             if value != self._o[key]:    
                 self._o[key] = value
                 changed.append(key)
@@ -256,6 +242,32 @@ class ImageFlowWidget(QtGui.QWidget):
                 image._clearCache()
         if len(changed):
             self.triggerRender()
+    
+    def saveData(self):
+        """Return a dict that stores the configuration of this widget using only standard data types. Use 
+        this to save configuration persistently."""
+        data = {}
+        for option, value in self._o.items():
+            if value == OPTIONS[option][1]: # default value
+                continue
+            if isinstance(option, QtGui.QColor):
+                value = (value.red(), value.green(), value.blue())
+            elif isinstance(option, QtCore.QSize):
+                value = (value.width(), value.height())
+            else: assert isinstance(value, (int, float, bool, str))
+            data[option] = value
+        return data
+    
+    def loadData(self, data):
+        """Load configuration from a dict created by saveDate."""
+        options = {}
+        for option, value in data.items():
+            if option not in OPTIONS:
+                raise KeyError("Invalid option '{}'.".format(option))
+            if OPTIONS[option][0] in (QtGui.QColor, QtCore.QSize):
+                value = OPTIONS[option][0](*value)
+            options[option] = value
+        self.setOptions(options)
         
     def count(self):
         """Return the number of images."""
@@ -263,7 +275,7 @@ class ImageFlowWidget(QtGui.QWidget):
        
     def setPaths(self, paths):
         """Display the images at the given paths."""
-        self.setImages([Image(path=path, rotate=self._o['rotate']) for path in paths])
+        self.setImages([Image(path=path) for path in paths])
        
     def setPixmaps(self, pixmaps):
         """Display the given QPixmaps."""
@@ -324,6 +336,37 @@ class ImageFlowWidget(QtGui.QWidget):
         self.renderer.dirty = True
         self.update()
         
+    def createConfigWidget(self, parent):
+        """Return a widget that allows to configure this ImageFlow."""
+        return ConfigWidget(self, parent)
+    
+    def imageAt(self, point):
+        """Return the Image-instance at the given point (QPoint or QPointF) or None."""
+        index = self.indexAt(point)
+        if index is not None:
+            return self.images[index]
+                               
+    def indexAt(self, point):
+        """Return the index (in self.images) of the image at the given point (QPoint or QPointF) or None
+        if no image is there."""
+        if isinstance(point, QtCore.QPoint):
+            point = QtCore.QPointF(point)
+        if len(self.images) == 0:
+            return None
+        o = self._o
+        centerIndex = max(0, min(round(self._pos), len(self.images)-1))
+        imagesLeft = imagesRight = o['imagesPerSide']
+        if self._pos < round(self._pos):
+            imagesLeft += 1
+        elif self._pos > round(self._pos):
+            imagesRight += 1
+        for index in range(max(0, centerIndex-imagesLeft), min(centerIndex+imagesRight+1, len(self.images))):
+            rect = self.renderer.imageRect(index, translate=True)
+            if rect.contains(point):
+                return index
+        else:   
+            return None
+        
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Left:
             self.showPosition(self.animator.target()-1)
@@ -338,47 +381,6 @@ class ImageFlowWidget(QtGui.QWidget):
         if self.animator.target() is not None:
             self.showPosition(self.animator.target() - round(event.delta()/120))
         event.accept()
-    
-    def imageAt(self, point):
-        index = self.indexAt(point)
-        if index is not None:
-            return self.images[index]
-                               
-    def indexAt(self, point):
-        """Return the Image-instance at the given point (QPoint or QPointF) or None if no image is there."""
-        if isinstance(point, QtCore.QPoint):
-            point = QtCore.QPointF(point)
-        if len(self.images) == 0:
-            return None
-        o = self._o
-        centerIndex = max(0, min(round(self._pos), len(self.images)-1))
-        rect = self.renderer.imageRect(centerIndex)
-        if rect.contains(point):
-            return centerIndex
-        
-        imagesLeft = imagesRight = o['imagesPerSide']
-        if self._pos < round(self._pos):
-            imagesLeft += 1
-        elif self._pos > round(self._pos):
-            imagesRight += 1
-            
-        if point.x() < rect.left():
-            # test images to the left
-            for index in reversed(range(max(0, centerIndex-imagesLeft), centerIndex)):
-                rect = self.renderer.imageRect(index)
-                if rect.contains(point):
-                    return index
-                elif point.x() >= rect.left():
-                    return None
-        elif point.x() > rect.right():
-            # test images to the right
-            for index in range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.images))):
-                rect = self.renderer.imageRect(index)
-                if rect.contains(point):
-                    return index
-                elif point.x() <= rect.right():
-                    return None
-        return None
     
     def mousePressEvent(self, event):
         self._mousePressPosition = event.pos()
@@ -412,21 +414,8 @@ class ImageFlowWidget(QtGui.QWidget):
     def resizeEvent(self, event):
         self.triggerRender()
         super().resizeEvent(event)
-        
-    def createConfigWidget(self, parent):
-        return ConfigWidget(self, parent)
-    
-    def state(self):
-        bg = self.option('background')
-        size = self.option('size')
-        return {
-            'background': (bg.red(), bg.green(), bg.blue()),
-            'size': (size.width(), size.height()),
-            'imagesPerSide': self.option('imagesPerSide'),
-            'curve': self.option('curve'),
-            'reflection': self.option('reflection'),
-            'fadeOut': self.option('fadeOut'),
-        }
+            
+            
         
       
 class Renderer:
@@ -440,6 +429,8 @@ class Renderer:
     def init(self):
         """Initialize the internal buffer. Call this whenever the widget's size has changed."""
         self.size = self.widget.size()
+        if self.size.isEmpty():
+            return
         self.buffer = QtGui.QPixmap(self.size)
         self.dirty = True
     
@@ -460,57 +451,75 @@ class Renderer:
         self.renderImages()
         self.dirty = False
         
+        
+    def renderImage2(self, painter, index, rect, part, left):
+        image = self.widget.images[index]
+        pixmap = image.cache(self._o)
+        if pixmap.isNull() or not rect.isValid():
+            return
+        if part == 1:
+            painter.drawPixmap(rect.toRect(), pixmap)
+        elif left:
+            painter.drawPixmap(rect.toRect(), pixmap,
+                               QtCore.QRect(0, 0, part*pixmap.width(), pixmap.height()))
+        else:
+            painter.drawPixmap(rect.toRect(), pixmap,
+                               QtCore.QRect((1-part)*pixmap.width(), 0, part*pixmap.width(), pixmap.height()))
+    
     def renderImages(self):
         """Render all images."""
         if len(self.widget.images) == 0:
             return
         o = self._o
         painter = QtGui.QPainter(self.buffer)
-        painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
-        dx, dy = self._getTranslation()
-        painter.translate(dx, dy)
+        # Using smooth transforms needs twice as much time (which is too little to notice). Because I can't
+        # see any difference in image quality I don't use it.
+        # Note that it makes no difference for the central image which is copied from cache without resizing.
+        painter.translate(*self._getTranslation())
         centerIndex = max(0, min(round(self.widget._pos), len(self.widget.images)-1))
         imagesLeft = imagesRight = o['imagesPerSide']
         if self.widget._pos < round(self.widget._pos):
             imagesLeft += 1
         elif self.widget._pos > round(self.widget._pos):
             imagesRight += 1
+             
+        if DEBUG_TIMES:
+            if all(self.widget.images[i]._cache is not None for i in
+                range(max(0, centerIndex-imagesLeft),
+                      min(len(self.widget.images), centerIndex+imagesRight+1))):
+                start = time.perf_counter()
+            else: start = None
             
+        centerRect = self.imageRect(centerIndex)
+        imagesLeft = range(max(0, centerIndex-imagesLeft), centerIndex)
+        nextRect = None
+        for i in imagesLeft:
+            rect = nextRect if nextRect is not None else self.imageRect(i)
+            nextRect = self.imageRect(i+1) if i+1 in imagesLeft else centerRect
+            if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
+                    and nextRect.right() >= rect.right():
+                part = (nextRect.left()-rect.left()) / rect.width()
+                rect.setRight(nextRect.left())
+            else: part = 1
+            self.renderImage2(painter, i, rect, part, left=True)
             
-            
-        #if all(self.widget.images[i].pixmap is not None for i in range(max(0,centerIndex-imagesLeft),min(len(self.widget.images), centerIndex+imagesRight+1))):
-            #start = time.perf_counter()
-        #else: start = None
-        
-        for i in range(max(0, centerIndex-imagesLeft), centerIndex):
-           rect = self.renderImage(painter, i)
-        for i in reversed(range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images)))):
-           rect = self.renderImage(painter, i)
-        self.renderImage(painter, centerIndex)
-        
-        #centerIndex = max(0, min(round(self.widget._pos), len(self.widget.images)-1))
-        #centerRect = self.renderImage(painter, centerIndex)
-        #clipRect = QtCore.QRect(-dx, -dy, dx+centerRect.left(), self.buffer.height())
-        #for i in reversed(range(max(0, centerIndex-imagesLeft), centerIndex)):
-            #painter.setClipRect(clipRect)
-            #rect = self.renderImage(painter, i)
-            #if rect is None:
-                #break
-            #clipRect.setRight(min(clipRect.right(), rect.left()-1))
-        #clipRect = QtCore.QRect(centerRect.right(),
-                                #-dy,
-                                #self.buffer.width()-centerRect.right(),
-                                #self.buffer.height())
-        #for i in range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images))):
-            #painter.setClipRect(clipRect)
-            #rect = self.renderImage(painter, i)
-            #if rect is None:
-                #break
-            #clipRect.setLeft(max(clipRect.left(), rect.right()))
+        imagesRight = range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images)))
+        nextRect = None
+        for i in reversed(imagesRight):
+            rect = nextRect if nextRect is not None else self.imageRect(i)
+            nextRect = self.imageRect(i-1) if i-1 in imagesRight else centerRect
+            if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
+                    and nextRect.left() <= rect.left():
+                part = (rect.right()-nextRect.right()) / rect.width()
+                rect.setLeft(nextRect.right())
+            else: part = 1
+            self.renderImage2(painter, i, rect, part, left=False)
+        self.renderImage2(painter, centerIndex, centerRect, 1, False)
+
         painter.end()
-        #if start is not None:
-            #times.append(time.perf_counter()-start)
-            #print(sum(times)/len(times))
+        if DEBUG_TIMES and start is not None:
+            _times.append(time.perf_counter() - start)
+            print(sum(_times) / len(_times))
 
     def _getTranslation(self):
         """Return the translation of the coordinate system used for drawing images as (dx, dy)."""
@@ -522,7 +531,7 @@ class Renderer:
         dy = max(0, int((self.buffer.height()-necessaryHeight) * o['vAlign']))
         return (dx, dy)
        
-    def imageRect(self, index, pixmap=None, translate=True):
+    def imageRect(self, index, pixmap=None, translate=False):
         o = self._o
         w = o['size'].width()
         h = o['size'].height()
@@ -606,7 +615,7 @@ class Renderer:
         pixmap = image.cache(self._o)
         if pixmap.isNull():
             return QtCore.QRect()
-        rect = self.imageRect(index, pixmap=pixmap, translate=False)
+        rect = self.imageRect(index, pixmap=pixmap)
         if rect.isValid():
             painter.drawPixmap(rect.toRect(), pixmap)
 
@@ -743,26 +752,27 @@ class ConfigWidget(QtGui.QWidget):
         self.imageFlow.setOption('vAlign', 0.7 if checked else 0.5)
 
 
-# Test code to test imageflow without main application.
+# Stand-alone application to test the image flow.
 if __name__ == "__main__":
-    import os, os.path, argparse
+    import os, os.path, argparse, sys
+    
+    # Parse arguments
     parser = argparse.ArgumentParser(description="Show the images within one folder in an ImageFlow.")
     parser.add_argument('path', nargs='?', help="Path of the folder, defaults to current directory", default='.')
     parser.add_argument('--random', help="Shuffle the images.", action='store_true')
     parser.add_argument('--no-random', dest='random', action='store_false')
-    parser.add_argument('--rotate', help="Rotate images according to EXIF-data (requires Wand, http://docs.wand-py.org/).", action='store_true')
-    parser.add_argument('--no-rotate', dest='rotate', action='store_false')
-    parser.add_argument('--size', help="Maximal size of central image, e.g. 500x300. A single number can be used as shorthand for a square size.")
-    parser.add_argument('--reflection', help="Add reflection.", action='store_true')
-    parser.add_argument('--no-reflection', dest='reflection', action='store_false')
-    parser.add_argument('--background', help="Background color. Possible values are e.g. 'red', '#a2ee3f'. See http://qt-project.org/doc/qt-4.8/qcolor.html#setNamedColor for all possibilities.")
-    parser.add_argument('--valign', help="Vertical align of whole image flow. 0=top, 0.5=center, 1=bottom, linear in between.", type=float)
-    parser.add_argument('--imagevalign', help="Vertical align of images within image flow. 0=top, 0.5=center, 1=bottom, linear in between.", type=float)
-    parser.add_argument('--imagesperside', help="How many images should be visible on both sides of the central image?", type=int)
-    parser.set_defaults(random=False, rotate=True, reflection=True)
+    defaults={'random': False}
+    for option, (optionType, default, description) in OPTIONS.items():
+        if optionType is bool:
+            parser.add_argument('--'+option, dest=option, action='store_true', help=description)
+            parser.add_argument('--no-'+option, dest=option, action='store_false')
+            defaults[option] = default
+        else:
+            if optionType in (QtGui.QColor, QtCore.QSize):
+                optionType = str
+            parser.add_argument('--'+option, type=optionType, help=description)
+    parser.set_defaults(**defaults)
     args = parser.parse_args()
-    
-    app = QtGui.QApplication([])
     
     # Load paths
     folder = os.path.abspath(os.path.expanduser(args.path))
@@ -773,6 +783,7 @@ if __name__ == "__main__":
         random.shuffle(paths)
        
     # Create GUI
+    app = QtGui.QApplication([])
     widget = QtGui.QWidget()
     widget.setWindowTitle("Image flow")
     widget.resize(1400, 600)
@@ -799,31 +810,35 @@ if __name__ == "__main__":
     layout.addWidget(imageWidget)
     
     # Set options
-    imageWidget.setOption('rotate', args.rotate)
-    imageWidget.setOption('reflection', args.reflection)
-    if args.size is not None:
-        numbers = args.size.lower().split('x')
-        if len(numbers) in [1,2] and all(len(n) > 0 for n in numbers) \
-                    and all(c in '0123456789' for c in ''.join(numbers)):
-            numbers = [max(1, min(int(n), 10000)) for n in numbers]
-            if len(numbers) == 1:
-                numbers *= 2
-            imageWidget.setOption('size', QtCore.QSize(*numbers))
-        else:
-            print("Invalid size.")
-            sys.exit(1)
-    if args.background is not None:
-        color = QtGui.QColor(args.background)
-        if not color.isValid():
-            print("Invalid bachground color.")
-            sys.exit(1)
-        imageWidget.setOption('background', color)
-    if args.valign is not None:
-        imageWidget.setOption('vAlign', max(0, min(args.valign, 1)))
-    if args.imagevalign is not None:
-        imageWidget.setOption('imageVAlign', max(0, min(args.imagevalign, 1)))
-    if args.imagesperside is not None: 
-        imageWidget.setOption('imagesPerSide', max(0, min(args.imagesperside, 10)))
+    options = {}
+    for option, (optionType, default, description) in OPTIONS.items():
+        value = getattr(args, option)
+        if value is None:
+            continue
+        elif optionType is QtGui.QColor:
+            value = QtGui.QColor(value)
+            if not value.isValid():
+                print("Invalid color specified for option '{}'.".format(option))
+                sys.exit(1)
+        elif optionType is QtCore.QSize:
+            numbers = args.size.lower().split('x')
+            if len(numbers) in [1,2] and all(len(n) > 0 for n in numbers) \
+                        and all(c in '0123456789' for c in ''.join(numbers)):
+                numbers = [max(1, min(int(n), 10000)) for n in numbers]
+                if len(numbers) == 1:
+                    numbers *= 2
+                value = QtCore.QSize(*numbers)
+            else:
+                print("Invalid size specified for option '{}'.".format(option))
+                sys.exit(1)
+        elif option in ('vAlign', 'imageVAlign'):
+            value = max(0, min(value, 1))
+        elif option == 'imagesPerSide':
+            value = max(0, min(value, 10))
+            
+        options[option] = value 
+        
+    imageWidget.setOptions(options)
        
     # Show
     imageWidget.setPaths(paths)
