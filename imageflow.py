@@ -102,9 +102,9 @@ class Image:
         self.path = path
         self.pixmap = pixmap
         self._cache = None
-        
+    
     def load(self, rotate=False):
-        """Load the image's pixmap."""
+        """Load the image's pixmap from filesystem."""
         if self.pixmap is not None:
             return
         if rotate:
@@ -134,10 +134,12 @@ class Image:
     def cache(self, options):
         """Return the cached version of this image. *options* is the set of options
         returned by ImageFlow.options."""
-        if self.pixmap is None:
-            self.load(options['rotate'])
         if self._cache is None:
-            self._createCache(options)
+            if self.pixmap is None:
+                self.load(options['rotate'])
+            if self.pixmap.isNull():
+                self._cache = self.pixmap
+            else: self._createCache(options)
         return self._cache
         
     def _createCache(self, options):
@@ -146,18 +148,10 @@ class Image:
         w = options['size'].width()
         h = options['size'].height()
         
-        pixmap = self.pixmap if self.pixmap is not None else QtGui.QPixmap(':omg/image_missing.png')
-        #TODO            
-        # I'd like to use the SVG-version, but Qt is not able to draw it correctly
-        #if not hasattr(self, '_imageMissingRenderer'):
-        #    self._imageMissingRenderer = QtSvg.QSvgRenderer('image_missing.svg')
-        #painter.fillRect(rect, Qt.black)
-        #self._imageMissingRenderer.render(painter, QtCore.QRectF(rect))
-        
         # For some reason drawing the result of pixmap.scaled gives better results than doing the same
         # scaling directly when drawing (drawPixmap(QtCore.QRect(0,0,w,h), pixmap))
         # Setting the SmoothPixmapTransform rendering hint does not change this behavior.
-        pixmap = pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pixmap = self.pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         w = pixmap.width()
         h = pixmap.height()
         if options['reflection']:
@@ -467,6 +461,7 @@ class Renderer:
             return
         o = self._o
         painter = QtGui.QPainter(self.buffer)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
         # Using smooth transforms needs twice as much time (which is too little to notice). Because I can't
         # see any difference in image quality I don't use it.
         # Note that it makes no difference for the central image which is copied from cache without resizing.
@@ -491,11 +486,13 @@ class Renderer:
         for i in imagesLeft:
             rect = nextRect if nextRect is not None else self.imageRect(i)
             nextRect = self.imageRect(i+1) if i+1 in imagesLeft else centerRect
-            if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
+            part = 1
+            if not self.widget.images[i].cache(o).isNull() and not self.widget.images[i+1].cache(o).isNull():
+                # Skip the part of this image that will be hidden by nextRect
+                if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
                     and nextRect.right() >= rect.right():
-                part = (nextRect.left()-rect.left()) / rect.width()
-                rect.setRight(nextRect.left())
-            else: part = 1
+                    part = (nextRect.left()-rect.left()) / rect.width()
+                    rect.setRight(nextRect.left())
             self.renderImage(painter, i, rect, part, left=True)
             
         imagesRight = range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images)))
@@ -503,11 +500,13 @@ class Renderer:
         for i in reversed(imagesRight):
             rect = nextRect if nextRect is not None else self.imageRect(i)
             nextRect = self.imageRect(i-1) if i-1 in imagesRight else centerRect
-            if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
-                    and nextRect.left() <= rect.left():
-                part = (rect.right()-nextRect.right()) / rect.width()
-                rect.setLeft(nextRect.right())
-            else: part = 1
+            part = 1
+            if not self.widget.images[i].cache(o).isNull() and not self.widget.images[i-1].cache(o).isNull():
+                # Skip the part of this image that will be hidden by nextRect
+                if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
+                        and nextRect.left() <= rect.left():
+                    part = (rect.right()-nextRect.right()) / rect.width()
+                    rect.setLeft(nextRect.right())
             self.renderImage(painter, i, rect, part, left=False)
             
         self.renderImage(painter, centerIndex, centerRect, 1, False)
@@ -518,9 +517,20 @@ class Renderer:
             print(sum(_times) / len(_times))
         
     def renderImage(self, painter, index, rect, part, left):
-        image = self.widget.images[index]
-        pixmap = image.cache(self._o)
-        if pixmap.isNull() or not rect.isValid():
+        if not rect.isValid():
+            return
+        pixmap = self.widget.images[index].cache(self._o)
+        if pixmap.isNull():
+            # Draw missing picture
+            painter.fillRect(rect, QtGui.QColor(0,0,0, 160))
+            pen = QtGui.QPen(Qt.darkGray)
+            pen.setJoinStyle(Qt.MiterJoin)
+            pen.setWidth(2)
+            rect = QtCore.QRect(rect.x()+1, rect.y()+1, rect.width()-2, rect.height()-2)
+            painter.setPen(pen)
+            painter.drawRect(rect)
+            painter.drawLine(rect.topLeft(), rect.bottomRight())
+            painter.drawLine(rect.topRight(), rect.bottomLeft())
             return
         if part == 1:
             painter.drawPixmap(rect, pixmap)
@@ -543,14 +553,8 @@ class Renderer:
        
     def imageRect(self, index, pixmap=None, translate=False):
         o = self._o
-        w = o['size'].width()
-        h = o['size'].height()
-        if pixmap is None:
-            pixmap = self.widget.images[index].cache(o)
-        if pixmap.isNull():
-            return QtCore.QRect()
         
-        if index == self.widget.position():
+        if index == self.widget.position(): # central image; the if is necessary if o['imagesPerSide']=0
             x = 0
             z = 1
         else:
@@ -600,13 +604,22 @@ class Renderer:
         if scale <= 0:
             return QtCore.QRect()
         
-        # correct vertical align: y + imageVAlign*actualHeight = imageVAlign*maxHeight
-        if o['reflection']:
-            actualHeight = scale * pixmap.height() / (1+o['reflectionFactor'])
-        else: actualHeight = scale * pixmap.height()
-        y = o['imageVAlign'] * (o['size'].height() - actualHeight)
+        if pixmap is None:
+            pixmap = self.widget.images[index].cache(o)
+        if not pixmap.isNull():
+            w = pixmap.width()
+            h = pixmap.height()
+            if o['reflection']:
+                h /= 1+o['reflectionFactor'] # height without reflection
+        else:
+            # placeholder will be drawn
+            w = o['size'].width()
+            h = o['size'].height()
         
-        rect = QtCore.QRectF(0, 0, scale*pixmap.width(), scale*pixmap.height())
+        # The correct vertical offset y satisfies y + imageVAlign*scaledHeight = imageVAlign*maxHeight
+        y = o['imageVAlign'] * (o['size'].height() - scale*h)
+        
+        rect = QtCore.QRectF(0, 0, scale*w, scale*h)
         rect.translate(x-rect.width()/2, y)
         if translate:
             rect.translate(*self._getTranslation())
