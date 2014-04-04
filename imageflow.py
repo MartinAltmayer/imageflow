@@ -75,7 +75,7 @@ OPTIONS = {
                    "Add reflection."),
     'reflectionFactor': (float, 0.6, 
                          "Between 0 and 1; the higher the more visible is the reflection."),
-    'fadeOut': (bool, True,
+    'fadeOut': (bool, False,
                 "Fade out images on both sides."),
     'fadeStart': (float, 0.4,
                   "Number in [0, 1]. If fadeOut is True, images will start fading out on both sides at the "
@@ -349,8 +349,8 @@ class ImageFlowWidget(QtGui.QWidget):
     def indexAt(self, point):
         """Return the index (in self.images) of the image at the given point (QPoint or QPointF) or None
         if no image is there."""
-        if isinstance(point, QtCore.QPoint):
-            point = QtCore.QPointF(point)
+        if isinstance(point, QtCore.QPointF):
+            point = point.toPoint()
         if len(self.images) == 0:
             return None
         o = self._o
@@ -523,12 +523,12 @@ class Renderer:
         if pixmap.isNull() or not rect.isValid():
             return
         if part == 1:
-            painter.drawPixmap(rect.toRect(), pixmap)
+            painter.drawPixmap(rect, pixmap)
         elif left:
-            painter.drawPixmap(rect.toRect(), pixmap,
+            painter.drawPixmap(rect, pixmap,
                                QtCore.QRect(0, 0, part*pixmap.width(), pixmap.height()))
         else:
-            painter.drawPixmap(rect.toRect(), pixmap,
+            painter.drawPixmap(rect, pixmap,
                                QtCore.QRect((1-part)*pixmap.width(), 0, part*pixmap.width(), pixmap.height()))
             
         if self._o['fadeOut']:
@@ -610,7 +610,7 @@ class Renderer:
         rect.translate(x-rect.width()/2, y)
         if translate:
             rect.translate(*self._getTranslation())
-        return rect
+        return rect.toRect()
     
     def _availableWidth(self):
         """Return the width of the region that can be used for the center of images. This is a bit less than
