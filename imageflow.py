@@ -791,19 +791,26 @@ if __name__ == "__main__":
     layout.setContentsMargins(0,0,0,0)
     layout.setSpacing(0)
     configLayout = QtGui.QHBoxLayout()
-    curveBox = QtGui.QComboBox()
-    curveBox.addItems([c[1] for c in CURVES])
-    def handleCurveBox(index):
-        imageWidget.setOption('curve', curveBox.currentText())
-    curveBox.currentIndexChanged.connect(handleCurveBox)
-    configLayout.addWidget(curveBox)
-    configLayout.addStretch()
+    configButton = QtGui.QPushButton("Options")
+    configLayout.addWidget(configButton)
+    configWindow = None
+    def handleConfigButton():
+        global configWindow
+        if configWindow is None or not configWindow.isVisible():
+            configWindow = ConfigWidget(imageWidget)
+            configWindow.setWindowFlags(Qt.Tool)
+            # Display below configButton
+            configWindow.move(configButton.mapToGlobal(QtCore.QPoint(10, configButton.height()+10)))
+            configWindow.show()
+    configButton.clicked.connect(handleConfigButton)
     aboutButton = QtGui.QPushButton("Info")
     def handleAboutButton():
         QtGui.QMessageBox.information(widget, "About Image Flow", "Image Flow by Martin Altmayer. Licensed under GPL v3. See https://github.com/MartinAltmayer")
     aboutButton.clicked.connect(handleAboutButton)
     configLayout.addWidget(aboutButton)
+    configLayout.addStretch()
     layout.addLayout(configLayout)
+    
     imageWidget = ImageFlowWidget()
     imageWidget.imagePressed.connect(lambda im: print("Pressed on {}".format(im.path)))
     imageWidget.imageDblClicked.connect(lambda im: print("Double clicked on {}".format(im.path)))
