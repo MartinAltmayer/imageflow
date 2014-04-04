@@ -450,21 +450,16 @@ class Renderer:
         self.buffer.fill(self._o['background'])
         self.renderImages()
         self.dirty = False
-        
-        
-    def renderImage2(self, painter, index, rect, part, left):
-        image = self.widget.images[index]
-        pixmap = image.cache(self._o)
-        if pixmap.isNull() or not rect.isValid():
-            return
-        if part == 1:
-            painter.drawPixmap(rect.toRect(), pixmap)
-        elif left:
-            painter.drawPixmap(rect.toRect(), pixmap,
-                               QtCore.QRect(0, 0, part*pixmap.width(), pixmap.height()))
-        else:
-            painter.drawPixmap(rect.toRect(), pixmap,
-                               QtCore.QRect((1-part)*pixmap.width(), 0, part*pixmap.width(), pixmap.height()))
+
+    def _getTranslation(self):
+        """Return the translation of the coordinate system used for drawing images as (dx, dy)."""
+        o = self._o
+        dx = self.buffer.width() // 2
+        if o['reflection']:
+            necessaryHeight = (1+o['reflectionFactor']) * o['size'].height()
+        else: necessaryHeight = o['size'].height()
+        dy = max(0, int((self.buffer.height()-necessaryHeight) * o['vAlign']))
+        return (dx, dy)
     
     def renderImages(self):
         """Render all images."""
@@ -501,7 +496,7 @@ class Renderer:
                 part = (nextRect.left()-rect.left()) / rect.width()
                 rect.setRight(nextRect.left())
             else: part = 1
-            self.renderImage2(painter, i, rect, part, left=True)
+            self.renderImage(painter, i, rect, part, left=True)
             
         imagesRight = range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images)))
         nextRect = None
@@ -513,23 +508,38 @@ class Renderer:
                 part = (rect.right()-nextRect.right()) / rect.width()
                 rect.setLeft(nextRect.right())
             else: part = 1
-            self.renderImage2(painter, i, rect, part, left=False)
-        self.renderImage2(painter, centerIndex, centerRect, 1, False)
+            self.renderImage(painter, i, rect, part, left=False)
+            
+        self.renderImage(painter, centerIndex, centerRect, 1, False)
 
         painter.end()
         if DEBUG_TIMES and start is not None:
             _times.append(time.perf_counter() - start)
             print(sum(_times) / len(_times))
-
-    def _getTranslation(self):
-        """Return the translation of the coordinate system used for drawing images as (dx, dy)."""
-        o = self._o
-        dx = self.buffer.width() // 2
-        if o['reflection']:
-            necessaryHeight = (1+o['reflectionFactor']) * o['size'].height()
-        else: necessaryHeight = o['size'].height()
-        dy = max(0, int((self.buffer.height()-necessaryHeight) * o['vAlign']))
-        return (dx, dy)
+        
+    def renderImage(self, painter, index, rect, part, left):
+        image = self.widget.images[index]
+        pixmap = image.cache(self._o)
+        if pixmap.isNull() or not rect.isValid():
+            return
+        if part == 1:
+            painter.drawPixmap(rect.toRect(), pixmap)
+        elif left:
+            painter.drawPixmap(rect.toRect(), pixmap,
+                               QtCore.QRect(0, 0, part*pixmap.width(), pixmap.height()))
+        else:
+            painter.drawPixmap(rect.toRect(), pixmap,
+                               QtCore.QRect((1-part)*pixmap.width(), 0, part*pixmap.width(), pixmap.height()))
+            
+        if self._o['fadeOut']:
+            # Scale x into [-1, 1] (this inverts a scaling in self.imageRect)
+            x = rect.center().x() / self._availableWidth() * 2
+            if abs(x) > self._o['fadeStart']:
+                alpha = round(255 * max(0, 1-(abs(x)-self._o['fadeStart'])))
+                if alpha < 255:
+                    color = QtGui.QColor(self._o['background'])
+                    color.setAlpha(255-alpha)
+                    painter.fillRect(rect, color)
        
     def imageRect(self, index, pixmap=None, translate=False):
         o = self._o
@@ -607,29 +617,6 @@ class Renderer:
         the widget's width to leave enough space at the edges so that the outer images are completely
         visible."""
         return self.buffer.width() - self._o['minScale']*self._o['size'].width()
-        
-    def renderImage(self, painter, index):
-        """Render the image at *index* (index within the list of images) using the given QPainter. Return
-        the image's rectangle."""
-        image = self.widget.images[index]
-        pixmap = image.cache(self._o)
-        if pixmap.isNull():
-            return QtCore.QRect()
-        rect = self.imageRect(index, pixmap=pixmap)
-        if rect.isValid():
-            painter.drawPixmap(rect.toRect(), pixmap)
-
-            if False and self._o['fadeOut']:
-                # Scale x into [-1, 1] (this inverts a scaling in self.imageRect)
-                x = rect.center().x() / self._availableWidth() * 2
-                if abs(x) > self._o['fadeStart']:
-                    alpha = round(255 * max(0, 1-(abs(x)-self._o['fadeStart'])))
-                    if alpha < 255:
-                        color = QtGui.QColor(self._o['background'])
-                        color.setAlpha(255-alpha)
-                        painter.fillRect(rect, color)
-            
-        return rect
 
 
 class Animator:
