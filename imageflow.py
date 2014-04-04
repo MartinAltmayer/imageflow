@@ -96,12 +96,13 @@ class Image:
     may be given. In this case the pixmap will not be loaded until it is visible in the image flow. Also,
     if *rotate* is true (and Wand available) the image will be rotated according to EXIF data.
     """
-    def __init__(self, path=None, pixmap=None):
+    def __init__(self, path=None, pixmap=None, text=None):
         if path is None and pixmap is None:
             raise ValueError("Either path or pixmap must be given")
         self.path = path
         self.pixmap = pixmap
         self._cache = None
+        self.text = text
     
     def load(self, rotate=False):
         """Load the image's pixmap from filesystem."""
@@ -355,7 +356,7 @@ class ImageFlowWidget(QtGui.QWidget):
         elif self._pos > round(self._pos):
             imagesRight += 1
         for index in range(max(0, centerIndex-imagesLeft), min(centerIndex+imagesRight+1, len(self.images))):
-            rect = self.renderer.imageRect(index, translate=True)
+            rect = self.renderer.getRenderInfo(index, translate=True).rect
             if rect.contains(point):
                 return index
         else:   
@@ -410,8 +411,14 @@ class ImageFlowWidget(QtGui.QWidget):
         super().resizeEvent(event)
             
             
-        
-      
+class RenderInfo:
+    def __init__(self, logicalX, rect, fullRect, pixmap):
+        self.logicalX = logicalX
+        self.rect = rect
+        self.fullRect = fullRect
+        self.pixmap = pixmap
+       
+
 class Renderer:
     """Renderer for ImageFlow. The renderer will render the images of the given ImageFlowWidget into
     an internal buffer and draw that buffer onto the widget."""
@@ -444,6 +451,197 @@ class Renderer:
         self.buffer.fill(self._o['background'])
         self.renderImages()
         self.dirty = False
+    
+    def renderImages(self):
+        """Render all images."""
+        o = self._o
+        images = self.widget.images
+        if len(images) == 0:
+            return
+        painter = QtGui.QPainter(self.buffer)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        # Using smooth transforms needs twice as much time (which is too little to notice). Because I can't
+        # see any difference in image quality I don't use it.
+        # Note that it makes no difference for the central image which is copied from cache without resizing.
+        painter.translate(*self._getTranslation())
+        centerIndex = max(0, min(round(self.widget._pos), len(images)-1))
+        imagesLeft = imagesRight = o['imagesPerSide']
+        if self.widget._pos < round(self.widget._pos):
+            imagesLeft += 1
+        elif self.widget._pos > round(self.widget._pos):
+            imagesRight += 1
+             
+        if DEBUG_TIMES:
+            if all(images[i]._cache is not None for i in
+                range(max(0, centerIndex-imagesLeft),
+                      min(len(images), centerIndex+imagesRight+1))):
+                start = time.perf_counter()
+            else: start = None
+           
+        # Render left images from left to center
+        centerInfo = self.getRenderInfo(centerIndex)
+        imagesLeft = range(max(0, centerIndex-imagesLeft), centerIndex)
+        nextInfo = None
+        for i in imagesLeft:
+            info = nextInfo if nextInfo is not None else self.getRenderInfo(i)
+            nextInfo = self.getRenderInfo(i+1) if i+1 in imagesLeft else centerInfo
+            if not info.pixmap.isNull() and not nextInfo.pixmap.isNull():
+                self.renderImage(painter, info, nextRect=nextInfo.fullRect, left=True)
+            else: self.renderImage(painter, info)
+            
+        # Render right images from right to center
+        imagesRight = range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images)))
+        nextInfo = None
+        for i in reversed(imagesRight):
+            info = nextInfo if nextInfo is not None else self.getRenderInfo(i)
+            nextInfo = self.getRenderInfo(i-1) if i-1 in imagesRight else centerInfo
+            if not info.pixmap.isNull() and not nextInfo.pixmap.isNull():
+                self.renderImage(painter, info, nextRect=nextInfo.fullRect, left=False)
+            else: self.renderImage(painter, info)
+            
+        # Render center image
+        self.renderImage(painter, centerInfo, text=images[centerIndex].path[-30:])
+
+        painter.end()
+        if DEBUG_TIMES and start is not None:
+            _times.append(time.perf_counter() - start)
+            print(sum(_times) / len(_times))
+       
+    def renderImage(self, painter, info, text=None, nextRect=None, left=None):
+        if not info.rect.isValid():
+            return
+        pixmap = info.pixmap
+        if pixmap.isNull():
+            self.renderMissingImage(painter, info.rect)
+        rect = info.fullRect
+        
+        source = None
+        if nextRect is not None and nextRect.isValid():
+            # Skip the part of this image that will be hidden by nextRect
+            if left:
+                if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
+                        and nextRect.right() >= rect.right():
+                    part = (nextRect.left()-rect.left()) / rect.width()
+                    source = QtCore.QRect(0, 0, part * pixmap.width(), pixmap.height())
+                    rect.setRight(nextRect.left())
+            else:
+                if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
+                        and nextRect.left() <= rect.left():
+                    part = (rect.right()-nextRect.right()) / rect.width()
+                    source = QtCore.QRect((1-part)*pixmap.width(), 0, part*pixmap.width(), pixmap.height())
+                    rect.setLeft(nextRect.right())
+        
+        if source is None:
+            painter.drawPixmap(rect, pixmap)
+        else: painter.drawPixmap(rect, pixmap, source)
+        
+        if text is not None:
+            textRect = QtCore.QRect(info.rect.left(), info.rect.bottom(), info.rect.width(), 30)
+            pen = QtGui.QPen(Qt.white)
+            painter.setPen(pen)
+            painter.drawText(textRect, Qt.AlignCenter | Qt.AlignTop, text)
+            
+        if self._o['fadeOut']:
+            if abs(info.logicalX) > self._o['fadeStart']:
+                alpha = round(255 * max(0, 1-(abs(info.logicalX)-self._o['fadeStart'])))
+                if alpha < 255:
+                    color = QtGui.QColor(self._o['background'])
+                    color.setAlpha(255-alpha)
+                    painter.fillRect(rect, color)
+        
+    def getRenderInfo(self, index, translate=False):
+        o = self._o
+        pixmap = self.widget.images[index].cache(o)
+        
+        if index == self.widget.position(): # central image; the if is necessary if o['imagesPerSide']=0
+            lx = 0
+            z = 1
+        else:
+            # When seen from above, the images are arranged on a curve, with the central image
+            # being "nearest" to the user and the outermost images being "farthest".
+            # This is then used to determine the scale factors in the front view.
+            # The curve is between [-1,1] for lx and [0,1] for z
+            if o['curve'] == "arc":
+                radians = (index-self.widget._pos) / o['imagesPerSide'] * o['segmentRads'] / 2
+                lx = math.sin(radians)/abs(math.sin(o['segmentRads']/2))
+                minCos = math.cos(o['segmentRads']/2)
+                z = (math.cos(radians)-minCos)/(1.-minCos) # between 0 and 1
+            elif o['curve'] == "v":
+                lx = (index-self.widget._pos) / o['imagesPerSide']
+                z = 1.-abs(lx)
+            elif o['curve'] == "cos":
+                lx = (index-self.widget._pos) / o['imagesPerSide']
+                z = math.cos(lx*math.pi/2.) # between 0 and 1
+            elif o['curve'] == "cossqrt":
+                lx = (index-self.widget._pos) / o['imagesPerSide']
+                if lx >= 0:
+                    lx = math.sqrt(lx)
+                else: lx = -math.sqrt(-lx)
+                z = math.cos(lx*math.pi/2.) # between 0 and 1
+            elif o['curve'] == "peak":
+                lx = (index-self.widget._pos) / o['imagesPerSide']
+                if lx >= 0:
+                    z = (lx-1)**2
+                else: z = (lx+1)**2
+            elif o['curve'] == "gallery":
+                lx = (index-self.widget._pos) / o['imagesPerSide']
+                if abs(lx) >= 1./o['imagesPerSide']:
+                    z = 0
+                elif lx >= 0:
+                    z = (lx*o['imagesPerSide'] - 1)**2
+                else:
+                    z = (lx*o['imagesPerSide'] + 1)**2
+            else:
+                assert False
+         
+        scale = o['minScale'] + min(1, z) * (1.-o['minScale'])
+        if scale <= 0:
+            rect = QtCore.QRect() # invalid rect
+            return RenderInfo(lx, rect, rect, pixmap)
+             
+        if not pixmap.isNull():
+            w = scale * pixmap.width()
+            if o['reflection']:
+                fullH = scale * pixmap.height()
+                h = fullH / (1+o['reflectionFactor'])
+            else:
+                h = fullH = scale * pixmap.height()
+        else:
+            # placeholder will be drawn
+            w = scale * o['size'].width()
+            h = fullH = scale * o['size'].height()
+         
+        x = (lx * self._availableWidth()) / 2 # Scale x from [-1, 1] to pixel coordinates
+        x -= w / 2 # lx refers to the center
+        # The correct vertical offset y satisfies y + imageVAlign*scaledHeight = imageVAlign*maxHeight
+        y = o['imageVAlign'] * (o['size'].height() - h)
+
+        rect = QtCore.QRect(x, y, w, h)
+        fullRect = QtCore.QRect(x, y, w, fullH) if fullH != h else rect
+        
+        if translate:
+            rect.translate(*self._getTranslation())
+            fullRect.translate(*self._getTranslation())
+          
+        return RenderInfo(lx, rect, fullRect, pixmap)
+          
+    def renderMissingImage(self, painter, rect):
+        """Render a crossed rectangle into *rect* to indicate an image that could not be loaded."""
+        painter.fillRect(rect, QtGui.QColor(0,0,0, 160))
+        pen = QtGui.QPen(Qt.darkGray)
+        pen.setJoinStyle(Qt.MiterJoin)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        rect = QtCore.QRect(rect.x()+1, rect.y()+1, rect.width()-2, rect.height()-2)
+        painter.drawRect(rect)
+        painter.drawLine(rect.topLeft(), rect.bottomRight())
+        painter.drawLine(rect.topRight(), rect.bottomLeft())
+        
+    def _availableWidth(self):
+        """Return the width of the region that can be used for the center of images. This is a bit less than
+        the widget's width to leave enough space at the edges so that the outer images are completely
+        visible."""
+        return self.buffer.width() - self._o['minScale'] * self._o['size'].width()
 
     def _getTranslation(self):
         """Return the translation of the coordinate system used for drawing images as (dx, dy)."""
@@ -454,182 +652,6 @@ class Renderer:
         else: necessaryHeight = o['size'].height()
         dy = max(0, int((self.buffer.height()-necessaryHeight) * o['vAlign']))
         return (dx, dy)
-    
-    def renderImages(self):
-        """Render all images."""
-        if len(self.widget.images) == 0:
-            return
-        o = self._o
-        painter = QtGui.QPainter(self.buffer)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        # Using smooth transforms needs twice as much time (which is too little to notice). Because I can't
-        # see any difference in image quality I don't use it.
-        # Note that it makes no difference for the central image which is copied from cache without resizing.
-        painter.translate(*self._getTranslation())
-        centerIndex = max(0, min(round(self.widget._pos), len(self.widget.images)-1))
-        imagesLeft = imagesRight = o['imagesPerSide']
-        if self.widget._pos < round(self.widget._pos):
-            imagesLeft += 1
-        elif self.widget._pos > round(self.widget._pos):
-            imagesRight += 1
-             
-        if DEBUG_TIMES:
-            if all(self.widget.images[i]._cache is not None for i in
-                range(max(0, centerIndex-imagesLeft),
-                      min(len(self.widget.images), centerIndex+imagesRight+1))):
-                start = time.perf_counter()
-            else: start = None
-            
-        centerRect = self.imageRect(centerIndex)
-        imagesLeft = range(max(0, centerIndex-imagesLeft), centerIndex)
-        nextRect = None
-        for i in imagesLeft:
-            rect = nextRect if nextRect is not None else self.imageRect(i)
-            nextRect = self.imageRect(i+1) if i+1 in imagesLeft else centerRect
-            part = 1
-            if not self.widget.images[i].cache(o).isNull() and not self.widget.images[i+1].cache(o).isNull():
-                # Skip the part of this image that will be hidden by nextRect
-                if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
-                    and nextRect.right() >= rect.right():
-                    part = (nextRect.left()-rect.left()) / rect.width()
-                    rect.setRight(nextRect.left())
-            self.renderImage(painter, i, rect, part, left=True)
-            
-        imagesRight = range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images)))
-        nextRect = None
-        for i in reversed(imagesRight):
-            rect = nextRect if nextRect is not None else self.imageRect(i)
-            nextRect = self.imageRect(i-1) if i-1 in imagesRight else centerRect
-            part = 1
-            if not self.widget.images[i].cache(o).isNull() and not self.widget.images[i-1].cache(o).isNull():
-                # Skip the part of this image that will be hidden by nextRect
-                if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
-                        and nextRect.left() <= rect.left():
-                    part = (rect.right()-nextRect.right()) / rect.width()
-                    rect.setLeft(nextRect.right())
-            self.renderImage(painter, i, rect, part, left=False)
-            
-        self.renderImage(painter, centerIndex, centerRect, 1, False)
-
-        painter.end()
-        if DEBUG_TIMES and start is not None:
-            _times.append(time.perf_counter() - start)
-            print(sum(_times) / len(_times))
-        
-    def renderImage(self, painter, index, rect, part, left):
-        if not rect.isValid():
-            return
-        pixmap = self.widget.images[index].cache(self._o)
-        if pixmap.isNull():
-            # Draw missing picture
-            painter.fillRect(rect, QtGui.QColor(0,0,0, 160))
-            pen = QtGui.QPen(Qt.darkGray)
-            pen.setJoinStyle(Qt.MiterJoin)
-            pen.setWidth(2)
-            rect = QtCore.QRect(rect.x()+1, rect.y()+1, rect.width()-2, rect.height()-2)
-            painter.setPen(pen)
-            painter.drawRect(rect)
-            painter.drawLine(rect.topLeft(), rect.bottomRight())
-            painter.drawLine(rect.topRight(), rect.bottomLeft())
-            return
-        if part == 1:
-            painter.drawPixmap(rect, pixmap)
-        elif left:
-            painter.drawPixmap(rect, pixmap,
-                               QtCore.QRect(0, 0, part*pixmap.width(), pixmap.height()))
-        else:
-            painter.drawPixmap(rect, pixmap,
-                               QtCore.QRect((1-part)*pixmap.width(), 0, part*pixmap.width(), pixmap.height()))
-            
-        if self._o['fadeOut']:
-            # Scale x into [-1, 1] (this inverts a scaling in self.imageRect)
-            x = rect.center().x() / self._availableWidth() * 2
-            if abs(x) > self._o['fadeStart']:
-                alpha = round(255 * max(0, 1-(abs(x)-self._o['fadeStart'])))
-                if alpha < 255:
-                    color = QtGui.QColor(self._o['background'])
-                    color.setAlpha(255-alpha)
-                    painter.fillRect(rect, color)
-       
-    def imageRect(self, index, pixmap=None, translate=False):
-        o = self._o
-        
-        if index == self.widget.position(): # central image; the if is necessary if o['imagesPerSide']=0
-            x = 0
-            z = 1
-        else:
-            # When seen from above, the images are arranged on a curve, with the central image
-            # being "nearest" to the user and the outermost images being "farthest".
-            # This is then used to determine the scale factors in the front view.
-            # The curve is between [-1,1] for x and [0,1] for z
-            if o['curve'] == "arc":
-                radians = (index-self.widget._pos) / o['imagesPerSide'] * o['segmentRads'] / 2
-                x = math.sin(radians)/abs(math.sin(o['segmentRads']/2))
-                minCos = math.cos(o['segmentRads']/2)
-                z = (math.cos(radians)-minCos)/(1.-minCos) # between 0 and 1
-            elif o['curve'] == "v":
-                x = (index-self.widget._pos) / o['imagesPerSide']
-                z = 1.-abs(x)
-            elif o['curve'] == "cos":
-                x = (index-self.widget._pos) / o['imagesPerSide']
-                z = math.cos(x*math.pi/2.) # between 0 and 1
-            elif o['curve'] == "cossqrt":
-                x = (index-self.widget._pos) / o['imagesPerSide']
-                if x >= 0:
-                    x = math.sqrt(x)
-                else: x = -math.sqrt(-x)
-                z = math.cos(x*math.pi/2.) # between 0 and 1
-            elif o['curve'] == "peak":
-                x = (index-self.widget._pos) / o['imagesPerSide']
-                if x >= 0:
-                    z = (x-1)**2
-                else: z = (x+1)**2
-            elif o['curve'] == "gallery":
-                x = (index-self.widget._pos) / o['imagesPerSide']
-                if abs(x) >= 1./o['imagesPerSide']:
-                    z = 0
-                elif x >= 0:
-                    z = (x*o['imagesPerSide'] - 1)**2
-                else:
-                    z = (x*o['imagesPerSide'] + 1)**2
-            else:
-                assert False
-         
-        # Scale x from [-1, 1] to pixel coordinates (x refers to the center of the image)
-        x *= self._availableWidth() / 2
-            
-        if z > 1:
-            z = 1
-        scale = o['minScale'] + z * (1.-o['minScale'])
-        if scale <= 0:
-            return QtCore.QRect()
-        
-        if pixmap is None:
-            pixmap = self.widget.images[index].cache(o)
-        if not pixmap.isNull():
-            w = pixmap.width()
-            h = pixmap.height()
-            if o['reflection']:
-                h /= 1+o['reflectionFactor'] # height without reflection
-        else:
-            # placeholder will be drawn
-            w = o['size'].width()
-            h = o['size'].height()
-        
-        # The correct vertical offset y satisfies y + imageVAlign*scaledHeight = imageVAlign*maxHeight
-        y = o['imageVAlign'] * (o['size'].height() - scale*h)
-        
-        rect = QtCore.QRectF(0, 0, scale*w, scale*h)
-        rect.translate(x-rect.width()/2, y)
-        if translate:
-            rect.translate(*self._getTranslation())
-        return rect.toRect()
-    
-    def _availableWidth(self):
-        """Return the width of the region that can be used for the center of images. This is a bit less than
-        the widget's width to leave enough space at the edges so that the outer images are completely
-        visible."""
-        return self.buffer.width() - self._o['minScale']*self._o['size'].width()
 
 
 class Animator:
@@ -790,6 +812,7 @@ if __name__ == "__main__":
     layout = QtGui.QVBoxLayout(widget)
     layout.setContentsMargins(0,0,0,0)
     layout.setSpacing(0)
+    
     configLayout = QtGui.QHBoxLayout()
     configButton = QtGui.QPushButton("Options")
     configLayout.addWidget(configButton)
@@ -802,6 +825,9 @@ if __name__ == "__main__":
             # Display below configButton
             configWindow.move(configButton.mapToGlobal(QtCore.QPoint(10, configButton.height()+10)))
             configWindow.show()
+        else:
+            configWindow.hide()
+            configWindow = None
     configButton.clicked.connect(handleConfigButton)
     aboutButton = QtGui.QPushButton("Info")
     def handleAboutButton():
