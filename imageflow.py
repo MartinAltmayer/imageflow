@@ -209,12 +209,12 @@ class ImageFlowWidget(QtGui.QWidget):
         if data is not None:
             self.loadData(data)
         
-        self.renderer = Renderer(self)
-        self.animator = Animator(self)
         if loadAsync:
-            self.worker = Worker(self._o)
+            self.worker = Worker(self._o) # use the same dict, so worker always uses current options
             self.worker.start()
         else: self.worker = None
+        self.renderer = Renderer(self)
+        self.animator = Animator(self)
         self.clear() # initialize
      
     def option(self, key):
@@ -445,13 +445,13 @@ class Renderer:
         self.widget = widget
         self._o = widget._o
         self.init()
-        #TODO if threading
-        self._frame = 0
-        self._loadingAnim = QtGui.QPixmap('process-working.png')
-        self.timer = QtCore.QTimer()
-        self.timer.setInterval(50)
-        self.timer.timeout.connect(self._handleTimer)
-        self.timer.start()
+        if self.widget.worker is not None:
+            self._frame = 0
+            self._loadingAnim = QtGui.QPixmap('process-working.png')
+            self.timer = QtCore.QTimer()
+            self.timer.setInterval(50)
+            self.timer.timeout.connect(self._handleTimer)
+            self.timer.start()
     
     def init(self):
         """Initialize the internal buffer. Call this whenever the widget's size has changed."""
@@ -502,6 +502,8 @@ class Renderer:
             imagesLeft += 1
         elif self.widget._pos > round(self.widget._pos):
             imagesRight += 1
+        imagesLeft = range(max(0, centerIndex-imagesLeft), centerIndex)
+        imagesRight = range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images)))
              
         if DEBUG_TIMES:
             if all(images[i]._cache is not None for i in
@@ -510,9 +512,23 @@ class Renderer:
                 start = time.perf_counter()
             else: start = None
            
+        # Load necessary images from center to the sides
+        loadList = []
+        if images[centerIndex].state == STATE_INIT:
+            loadList.append(images[centerIndex])
+        for left, right in zip(reversed(imagesLeft), imagesRight):
+            if images[left].state == STATE_INIT:
+                loadList.append(images[left])
+            if images[right].state == STATE_INIT:
+                loadList.append(images[right])
+        if self.widget.worker is not None:
+            self.widget.worker.load(loadList)
+        else:
+            for image in loadList:
+                image.createCache(o)
+            
         # Render left images from left to center
         centerInfo = self.getRenderInfo(centerIndex)
-        imagesLeft = range(max(0, centerIndex-imagesLeft), centerIndex)
         nextInfo = None
         for i in imagesLeft:
             info = nextInfo if nextInfo is not None else self.getRenderInfo(i)
@@ -522,7 +538,6 @@ class Renderer:
             else: self.renderImage(painter, info)
             
         # Render right images from right to center
-        imagesRight = range(centerIndex+1, min(centerIndex+imagesRight+1, len(self.widget.images)))
         nextInfo = None
         for i in reversed(imagesRight):
             info = nextInfo if nextInfo is not None else self.getRenderInfo(i)
@@ -542,7 +557,7 @@ class Renderer:
     def renderImage(self, painter, info, text=None, nextRect=None, left=None):
         if not info.rect.isValid():
             return
-        if info.image.state == STATE_LOADING:
+        if info.image.state <= STATE_LOADING:
             self.renderLoadingImage(painter, info.rect)
         elif info.image.state == STATE_FAILED:
             self.renderMissingImage(painter, info.rect)
@@ -587,12 +602,7 @@ class Renderer:
         
     def getRenderInfo(self, index, translate=False):
         o = self._o
-        
         image = self.widget.images[index]
-        if image.state == STATE_INIT:
-            if self.widget.worker is not None:
-                self.widget.worker.submit(image)
-            else: image.createCache(o)
         
         if index == self.widget.position(): # central image; the if is necessary if o['imagesPerSide']=0
             lx = 0
@@ -761,6 +771,45 @@ class Animator:
             self.widget._pos = min(t, self.widget._pos + self._v)
         else: self.widget._pos = max(t, self.widget._pos - self._v)
         self.widget.triggerRender()
+
+
+class Worker(threading.Thread):
+    def __init__(self, options):
+        super().__init__()
+        self.daemon = True
+        self.options = options
+        self._newEvent = threading.Event()
+        self._emptyEvent = None
+        self._loadList = []
+        self._running = True
+    
+    def load(self, images):
+        self._loadList = images
+        self._newEvent.set()
+          
+    def reset(self):
+        self._emptyEvent = threading.Event()
+        self.load([])
+        self._emptyEvent.wait()
+        self._emptyEvent = None
+                
+    def shutdown(self):
+        self._running = False
+        self._newEvent.set()
+        
+    def run(self):
+        while self._running:
+            loadList = self._loadList
+            if len(loadList) == 0:
+                if self._emptyEvent is not None:
+                    self._emptyEvent.set()
+                self._newEvent.wait()
+                self._newEvent.clear()
+            else:
+                for image in loadList:
+                    if image.state <= STATE_LOADING:
+                        image.createCache(self.options)
+                    break # check for a new list
         
         
 class ConfigWidget(QtGui.QWidget):
@@ -830,35 +879,6 @@ class ConfigWidget(QtGui.QWidget):
     def _handleReflectionBox(self, checked):
         self.imageFlow.setOption('reflection', checked)
         self.imageFlow.setOption('vAlign', 0.7 if checked else 0.5)
-
-
-class Worker(threading.Thread):
-    def __init__(self, options):
-        super().__init__()
-        self.daemon = True
-        self.options = options
-        self._queue = queue.LifoQueue()
-        self._quit = False
-    
-    def submit(self, image):
-        assert image.state == STATE_INIT
-        image.state = STATE_LOADING
-        self._queue.put(image)
-          
-    def reset(self):
-        while not self._queue.empty():
-            self._queue.get()
-                
-    def shutdown(self):
-        self._quit = True
-        self._queue.put(None) # wake up if blocking in queue.get
-        
-    def run(self):
-        while True:
-            image = self._queue.get()
-            if image is None or self._quit:
-                return
-            image.createCache(self.options)
         
     
 # Stand-alone application to test the image flow.
