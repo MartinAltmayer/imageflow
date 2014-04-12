@@ -411,14 +411,20 @@ class ImageFlowWidget(QtGui.QWidget):
         if event.buttons() & Qt.LeftButton and (event.pos() - self._mousePressPosition).manhattanLength() \
                                                 >= QtGui.QApplication.startDragDistance():
             image = self.imageAt(event.pos())
-            if image is not None and image.state == STATE_READY:
-                drag = QtGui.QDrag(self)
-                mimeData = QtCore.QMimeData(image.image)
-                drag.setMimeData(mimeData)
-                #drag.setPixmap(wrapper.element.getCover(100))
-                #drag.setHotSpot(QtCore.QPoint(50, 50))
-                drag.exec_()
-                self.setCursor(Qt.OpenHandCursor)
+            if image is not None:
+                self._startDrag(image)
+            
+    def _startDrag(self, image):
+        if image.path is not None:
+            drag = QtGui.QDrag(self)
+            mimeData = QtCore.QMimeData()
+            mimeData.setText(image.path)
+            mimeData.setUrls([QtCore.QUrl(image.path)])
+            if image.state == STATE_READY:
+                mimeData.setImageData(image.image)
+                drag.setPixmap(QtGui.QPixmap.fromImage(image.image).scaled(50, 50, Qt.KeepAspectRatio))
+            drag.setMimeData(mimeData)
+            drag.exec_()
             
     def resizeEvent(self, event):
         self.triggerRender()
@@ -428,8 +434,8 @@ class ImageFlowWidget(QtGui.QWidget):
         super().closeEvent(event)
         if event.isAccepted() and self.worker is not None:
             self.worker.shutdown()
-            
-            
+
+
 class RenderInfo:
     def __init__(self, image, logicalX, rect, fullRect):
         self.image = image
