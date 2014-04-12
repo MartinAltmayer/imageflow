@@ -15,7 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-import math, functools
+import math, functools, threading, queue
 
 from PyQt4 import QtCore, QtGui, QtSvg
 from PyQt4.QtCore import Qt
@@ -59,7 +59,7 @@ OPTIONS = {
     # on a curve. The central image is "nearest" to the user and will use a scale factor of 1.
     # The outermost images are "farthest" to the user and will be scaled using MIN_SCALE.
     'curve': (str, 'arc',
-              "Curve which describes how images become smalle on both sides of the center. "
+              "Curve which describes how images become smaller on both sides of the center. "
               "Possible values: "+','.join("'{}'".format(key) for _, key in CURVES)),
     'segmentRads': (float, 0.8*math.pi,
                     "Number in (0, pi]. Only for curve='arc'. Determines the length of the arc segment on "
@@ -74,7 +74,10 @@ OPTIONS = {
     'reflection': (bool, False,
                    "Add reflection."),
     'reflectionFactor': (float, 0.6, 
-                         "Between 0 and 1; the higher the more visible is the reflection."),
+                         "Between 0 and 1; Ratio of reflection height divided by image height."),
+    'reflectionAlpha': (float, 0.4,
+                        "How good should the reflection be visible?"
+                        "Between 0 (invisible) and 1 (visible like the original image)."),
     'fadeOut': (bool, False,
                 "Fade out images on both sides."),
     'fadeStart': (float, 0.4,
@@ -83,11 +86,16 @@ OPTIONS = {
                   "only images at the outermost position will fade out."),
 }
 
+OPTIONS_REBUILD_CACHE = ['size', 'background', 'reflection', 'reflectionFactor']
+
 
 DEBUG_TIMES = False
 if DEBUG_TIMES:
     import time
     _times = []
+
+
+STATE_INIT, STATE_LOADING, STATE_READY, STATE_FAILED = 1,2,3,4
 
 
 class Image:
@@ -100,14 +108,20 @@ class Image:
         if path is None and pixmap is None:
             raise ValueError("Either path or pixmap must be given")
         self.path = path
-        self.pixmap = pixmap
-        self._cache = None
+        assert pixmap is None
+        self.state = STATE_INIT
+        #if self.pixmap is None:
+            #self.state = STATE_INIT
+        #elif self.pixmap.isNull():
+            #self.state = STATE_FAILED
+        #else: self.state = STATE_READY
         self.text = text
+        self.image = None
+        self._cache = None
     
     def load(self, rotate=False):
-        """Load the image's pixmap from filesystem."""
-        if self.pixmap is not None:
-            return
+        """Load the image as QImage from filesystem."""
+        self.image = QtGui.QImage(self.path)
         if rotate:
             try:
                 import wand.image
@@ -115,72 +129,71 @@ class Image:
                 if 'exif:Orientation' in w.metadata:
                     orientation = w.metadata['exif:Orientation']
                     if orientation != 1:
-                        image = QtGui.QImage(self.path)
                         # Rotations stuff (read from EXIF data)
                         rotate = QtGui.QTransform()
                         if orientation == "6":
-                            image = image.transformed(rotate.rotate(90))
+                            self.image = self.image.transformed(rotate.rotate(90))
                         elif orientation == "8":
-                            image = image.transformed(rotate.rotate(270))
+                            self.image = self.image.transformed(rotate.rotate(270))
                         elif orientation == "3":
-                            image = image.transformed(rotate.rotate(180))
-                        self.pixmap = QtGui.QPixmap.fromImage(image)
-                        return
-            except ImportError:
+                            self.image = self.image.transformed(rotate.rotate(180))
+            except ImportError as e:
                 pass
             except Exception as e:
                 print(e)
-        self.pixmap = QtGui.QPixmap(self.path) # fallback
        
-    def cache(self, options):
-        """Return the cached version of this image. *options* is the set of options
-        returned by ImageFlow.options."""
-        if self._cache is None:
-            if self.pixmap is None:
-                self.load(options['rotate'])
-            if self.pixmap.isNull():
-                self._cache = self.pixmap
-            else: self._createCache(options)
+    def cache(self):
+        if isinstance(self._cache, QtGui.QImage):
+            self._cache = QtGui.QPixmap(self._cache)
         return self._cache
         
-    def _createCache(self, options):
+    def createCache(self, options):
         """Create the cached version of this image using the specified options (from ImageFlow.options).
         The cache version contains the resized image together with its reflection."""
+        if self.image is None:
+            self.load(options['rotate'])
+        if self.image.isNull():
+            self._cache = self.image
+            self.state = STATE_FAILED
+            return
+        
         w = options['size'].width()
         h = options['size'].height()
         
         # For some reason drawing the result of pixmap.scaled gives better results than doing the same
         # scaling directly when drawing (drawPixmap(QtCore.QRect(0,0,w,h), pixmap))
         # Setting the SmoothPixmapTransform rendering hint does not change this behavior.
-        pixmap = self.pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        w = pixmap.width()
-        h = pixmap.height()
+        image = self.image.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        w = image.width()
+        h = image.height()
         if options['reflection']:
             hRefl = int(h * options['reflectionFactor'])
         else: hRefl = 0
-        self._cache = QtGui.QPixmap(w, h + hRefl)
+        self._cache = QtGui.QImage(w, h + hRefl, QtGui.QImage.Format_RGB32)
         painter = QtGui.QPainter(self._cache)
-        painter.drawPixmap(0, 0, pixmap)
+        painter.drawImage(0, 0, image)
         
-        if options['reflection']:
+        if options['reflection'] and options['reflectionAlpha'] > 0:
             painter.setTransform(QtGui.QTransform(1, 0, 0, -1, 0, 0)) # draw reflection upside down
             source = QtCore.QRect(0, h-hRefl, w, hRefl)
             target = QtCore.QRect(0, -h-hRefl, w, hRefl)
-            painter.drawPixmap(target, self._cache, source)
+            painter.drawImage(target, self._cache, source)
             painter.resetTransform()
             
             gradient = QtGui.QLinearGradient(0, 0, 0, 1)
             gradient.setCoordinateMode(QtGui.QGradient.ObjectBoundingMode)
             color = QtGui.QColor(options['background'])
-            color.setAlpha(200)
+            color.setAlpha((1.-options['reflectionAlpha'])*255)
             gradient.setColorAt(0, color)
             gradient.setColorAt(1, options['background'])
             painter.fillRect(0, h, w, hRefl, gradient)
-            painter.end()
+        painter.end()
+        self.state = STATE_READY
     
     def _clearCache(self):
         """Delete the cached version. Use this whenever options which affect
         the cached version have changed."""
+        self.state = STATE_INIT
         self._cache = None
 
 
@@ -203,6 +216,8 @@ class ImageFlowWidget(QtGui.QWidget):
         
         self.renderer = Renderer(self)
         self.animator = Animator(self)
+        self.worker = Worker(self._o)
+        self.worker.start()
         self.clear() # initialize
      
     def option(self, key):
@@ -232,7 +247,8 @@ class ImageFlowWidget(QtGui.QWidget):
             if value != self._o[key]:    
                 self._o[key] = value
                 changed.append(key)
-        if any(k in changed for k in ['background', 'size', 'reflection', 'reflectionFactor']):
+        if any(k in OPTIONS_REBUILD_CACHE for k in changed):
+            self.worker.reset()
             for image in self.images:
                 image._clearCache()
         if len(changed):
@@ -409,14 +425,19 @@ class ImageFlowWidget(QtGui.QWidget):
     def resizeEvent(self, event):
         self.triggerRender()
         super().resizeEvent(event)
+        
+    def closeEvent(self, event):
+        super().closeEvent(event)
+        if event.isAccepted():
+            self.worker.shutdown()
             
             
 class RenderInfo:
-    def __init__(self, logicalX, rect, fullRect, pixmap):
+    def __init__(self, image, logicalX, rect, fullRect):
+        self.image = image
         self.logicalX = logicalX
         self.rect = rect
         self.fullRect = fullRect
-        self.pixmap = pixmap
        
 
 class Renderer:
@@ -426,6 +447,13 @@ class Renderer:
         self.widget = widget
         self._o = widget._o
         self.init()
+        #TODO if threading
+        self._frame = 0
+        self._loadingAnim = QtGui.QPixmap('process-working.png')
+        self.timer = QtCore.QTimer()
+        self.timer.setInterval(50)
+        self.timer.timeout.connect(self._handleTimer)
+        self.timer.start()
     
     def init(self):
         """Initialize the internal buffer. Call this whenever the widget's size has changed."""
@@ -434,7 +462,13 @@ class Renderer:
             return
         self.buffer = QtGui.QPixmap(self.size)
         self.dirty = True
-    
+       
+    def _handleTimer(self):
+        self._frame += 1
+        if self._frame >= 32:
+            self._frame = 1 # skip 0, see process-working.png
+        self.widget.triggerRender()
+        
     def paint(self):
         """Render images if self.dirty is true. In any case copy the buffer to the ImageFlowWidget."""
         if self.widget.size() != self.size:
@@ -485,7 +519,7 @@ class Renderer:
         for i in imagesLeft:
             info = nextInfo if nextInfo is not None else self.getRenderInfo(i)
             nextInfo = self.getRenderInfo(i+1) if i+1 in imagesLeft else centerInfo
-            if not info.pixmap.isNull() and not nextInfo.pixmap.isNull():
+            if info.image.state == STATE_READY and nextInfo.image.state == STATE_READY:
                 self.renderImage(painter, info, nextRect=nextInfo.fullRect, left=True)
             else: self.renderImage(painter, info)
             
@@ -495,12 +529,12 @@ class Renderer:
         for i in reversed(imagesRight):
             info = nextInfo if nextInfo is not None else self.getRenderInfo(i)
             nextInfo = self.getRenderInfo(i-1) if i-1 in imagesRight else centerInfo
-            if not info.pixmap.isNull() and not nextInfo.pixmap.isNull():
+            if info.image.state == STATE_READY and nextInfo.image.state == STATE_READY:
                 self.renderImage(painter, info, nextRect=nextInfo.fullRect, left=False)
             else: self.renderImage(painter, info)
             
         # Render center image
-        self.renderImage(painter, centerInfo, text=images[centerIndex].path[-30:])
+        self.renderImage(painter, centerInfo)#, text=images[centerIndex].path[-30:])
 
         painter.end()
         if DEBUG_TIMES and start is not None:
@@ -510,30 +544,34 @@ class Renderer:
     def renderImage(self, painter, info, text=None, nextRect=None, left=None):
         if not info.rect.isValid():
             return
-        pixmap = info.pixmap
-        if pixmap.isNull():
+        if info.image.state == STATE_LOADING:
+            self.renderLoadingImage(painter, info.rect)
+        elif info.image.state == STATE_FAILED:
             self.renderMissingImage(painter, info.rect)
-        rect = info.fullRect
-        
-        source = None
-        if nextRect is not None and nextRect.isValid():
-            # Skip the part of this image that will be hidden by nextRect
-            if left:
-                if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
-                        and nextRect.right() >= rect.right():
-                    part = (nextRect.left()-rect.left()) / rect.width()
-                    source = QtCore.QRect(0, 0, part * pixmap.width(), pixmap.height())
-                    rect.setRight(nextRect.left())
-            else:
-                if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
-                        and nextRect.left() <= rect.left():
-                    part = (rect.right()-nextRect.right()) / rect.width()
-                    source = QtCore.QRect((1-part)*pixmap.width(), 0, part*pixmap.width(), pixmap.height())
-                    rect.setLeft(nextRect.right())
-        
-        if source is None:
-            painter.drawPixmap(rect, pixmap)
-        else: painter.drawPixmap(rect, pixmap, source)
+        else:
+            pixmap = info.image.cache()
+            rect = info.fullRect
+            
+            source = None
+            if nextRect is not None and nextRect.isValid():
+                # Skip the part of this image that will be hidden by nextRect
+                if left:
+                    if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
+                            and nextRect.right() >= rect.right():
+                        part = (nextRect.left()-rect.left()) / rect.width()
+                        source = QtCore.QRect(0, 0, part * pixmap.width(), pixmap.height())
+                        rect.setRight(nextRect.left())
+                else:
+                    if nextRect.top() <= rect.top() and nextRect.bottom() >= rect.bottom() \
+                            and nextRect.left() <= rect.left():
+                        part = (rect.right()-nextRect.right()) / rect.width()
+                        source = QtCore.QRect((1-part)*pixmap.width(), 0,
+                                              part*pixmap.width(), pixmap.height())
+                        rect.setLeft(nextRect.right())
+            
+            if source is None:
+                painter.drawPixmap(rect, pixmap)
+            else: painter.drawPixmap(rect, pixmap, source)
         
         if text is not None:
             textRect = QtCore.QRect(info.rect.left(), info.rect.bottom(), info.rect.width(), 30)
@@ -547,11 +585,15 @@ class Renderer:
                 if alpha < 255:
                     color = QtGui.QColor(self._o['background'])
                     color.setAlpha(255-alpha)
-                    painter.fillRect(rect, color)
+                    painter.fillRect(info.fullRect, color)
         
     def getRenderInfo(self, index, translate=False):
         o = self._o
-        pixmap = self.widget.images[index].cache(o)
+        
+        image = self.widget.images[index]
+        if image.state == STATE_INIT:
+            #TODO if threading
+            self.widget.worker.submit(image)
         
         if index == self.widget.position(): # central image; the if is necessary if o['imagesPerSide']=0
             lx = 0
@@ -597,9 +639,10 @@ class Renderer:
         scale = o['minScale'] + min(1, z) * (1.-o['minScale'])
         if scale <= 0:
             rect = QtCore.QRect() # invalid rect
-            return RenderInfo(lx, rect, rect, pixmap)
+            return RenderInfo(image, lx, rect, rect)
              
-        if not pixmap.isNull():
+        if image.state == STATE_READY:
+            pixmap = image.cache()
             w = scale * pixmap.width()
             if o['reflection']:
                 fullH = scale * pixmap.height()
@@ -607,7 +650,7 @@ class Renderer:
             else:
                 h = fullH = scale * pixmap.height()
         else:
-            # placeholder will be drawn
+            # placeholder/loading image will be drawn
             w = scale * o['size'].width()
             h = fullH = scale * o['size'].height()
          
@@ -623,11 +666,11 @@ class Renderer:
             rect.translate(*self._getTranslation())
             fullRect.translate(*self._getTranslation())
           
-        return RenderInfo(lx, rect, fullRect, pixmap)
+        return RenderInfo(image, lx, rect, fullRect)
           
     def renderMissingImage(self, painter, rect):
         """Render a crossed rectangle into *rect* to indicate an image that could not be loaded."""
-        painter.fillRect(rect, QtGui.QColor(0,0,0, 160))
+        painter.fillRect(rect, QtGui.QColor(0, 0, 0, 160))
         pen = QtGui.QPen(Qt.darkGray)
         pen.setJoinStyle(Qt.MiterJoin)
         pen.setWidth(2)
@@ -636,6 +679,22 @@ class Renderer:
         painter.drawRect(rect)
         painter.drawLine(rect.topLeft(), rect.bottomRight())
         painter.drawLine(rect.topRight(), rect.bottomLeft())
+        
+    def renderLoadingImage(self, painter, rect):
+        """Render a crossed rectangle into *rect* to indicate an image that could not be loaded."""
+        painter.fillRect(rect, QtGui.QColor(0, 0, 0, 160))
+        pen = QtGui.QPen(Qt.darkGray)
+        pen.setJoinStyle(Qt.MiterJoin)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        rect = QtCore.QRect(rect.x()+1, rect.y()+1, rect.width()-2, rect.height()-2)
+        painter.drawRect(rect)
+        x = 32 * (self._frame % 8)
+        y = 32 * (self._frame // 8)
+        source = QtCore.QRect(x, y, 32, 32)
+        target = QtCore.QRect(source)
+        target.moveCenter(rect.center())
+        painter.drawPixmap(target, self._loadingAnim, source)
         
     def _availableWidth(self):
         """Return the width of the region that can be used for the center of images. This is a bit less than
@@ -774,6 +833,35 @@ class ConfigWidget(QtGui.QWidget):
         self.imageFlow.setOption('vAlign', 0.7 if checked else 0.5)
 
 
+class Worker(threading.Thread):
+    def __init__(self, options):
+        super().__init__()
+        self.daemon = True
+        self.options = options
+        self._queue = queue.LifoQueue()
+        self._quit = False
+    
+    def submit(self, image):
+        assert image.state == STATE_INIT
+        image.state = STATE_LOADING
+        self._queue.put(image)
+          
+    def reset(self):
+        while not self._queue.empty():
+            self._queue.get()
+                
+    def shutdown(self):
+        self._quit = True
+        self._queue.put(None) # wake up if blocking in queue.get
+        
+    def run(self):
+        while True:
+            image = self._queue.get()
+            if image is None or self._quit:
+                return
+            image.createCache(self.options)
+        
+    
 # Stand-alone application to test the image flow.
 if __name__ == "__main__":
     import os, os.path, argparse, sys
