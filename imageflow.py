@@ -17,7 +17,7 @@
 #
 import math, functools, threading
 
-from PyQt4 import QtCore, QtGui, QtSvg
+from PyQt4 import QtCore, QtGui
 from PyQt4.QtCore import Qt
 translate = QtCore.QCoreApplication.translate
 
@@ -95,7 +95,7 @@ if DEBUG_TIMES:
     _times = []
 
 
-STATE_INIT, STATE_LOADING, STATE_READY, STATE_FAILED = 1,2,3,4
+STATE_INIT, STATE_READY, STATE_FAILED = 1,2,3
 
 
 class Image:
@@ -369,7 +369,9 @@ class ImageFlowWidget(QtGui.QWidget):
             imagesLeft += 1
         elif self._pos > round(self._pos):
             imagesRight += 1
-        for index in range(max(0, centerIndex-imagesLeft), min(centerIndex+imagesRight+1, len(self.images))):
+        # Check images in front first
+        for index in _centerRange(max(0, centerIndex-imagesLeft), centerIndex,
+                                  min(centerIndex+imagesRight+1, len(self.images))):
             rect = self.renderer.getRenderInfo(index, translate=True).rect
             if rect.contains(point):
                 return index
@@ -409,14 +411,12 @@ class ImageFlowWidget(QtGui.QWidget):
         if event.buttons() & Qt.LeftButton and (event.pos() - self._mousePressPosition).manhattanLength() \
                                                 >= QtGui.QApplication.startDragDistance():
             image = self.imageAt(event.pos())
-            if image is not None:
-                return
-                #TODO
+            if image is not None and image.state == STATE_READY:
                 drag = QtGui.QDrag(self)
-                mimeData = selection.MimeData(selection.Selection(levels.real, [wrapper]))
+                mimeData = QtCore.QMimeData(image.image)
                 drag.setMimeData(mimeData)
-                drag.setPixmap(wrapper.element.getCover(100))
-                drag.setHotSpot(QtCore.QPoint(50, 50))
+                #drag.setPixmap(wrapper.element.getCover(100))
+                #drag.setHotSpot(QtCore.QPoint(50, 50))
                 drag.exec_()
                 self.setCursor(Qt.OpenHandCursor)
             
@@ -510,14 +510,8 @@ class Renderer:
             else: start = None
            
         # Load necessary images from center to the sides
-        loadList = []
-        if images[centerIndex].state == STATE_INIT:
-            loadList.append(images[centerIndex])
-        for left, right in zip(reversed(imagesLeft), imagesRight):
-            if images[left].state == STATE_INIT:
-                loadList.append(images[left])
-            if images[right].state == STATE_INIT:
-                loadList.append(images[right])
+        loadList = [images[index] for index in _centerRange(imagesLeft.start, centerIndex, imagesRight.stop)
+                    if images[index].state == STATE_INIT]
         if self.widget.worker is not None:
             self.widget.worker.load(loadList)
         else:
@@ -554,7 +548,7 @@ class Renderer:
     def renderImage(self, painter, info, text=None, nextRect=None, left=None):
         if not info.rect.isValid():
             return
-        if info.image.state <= STATE_LOADING:
+        if info.image.state == STATE_INIT:
             self.renderLoadingImage(painter, info.rect)
         elif info.image.state == STATE_FAILED:
             self.renderMissingImage(painter, info.rect)
@@ -670,7 +664,8 @@ class Renderer:
         
         if translate:
             rect.translate(*self._getTranslation())
-            fullRect.translate(*self._getTranslation())
+            if fullRect is not rect:
+                fullRect.translate(*self._getTranslation())
           
         return RenderInfo(image, lx, rect, fullRect)
           
@@ -810,11 +805,25 @@ class Worker(threading.Thread):
                 if not self.timer.isActive():
                     self.timer.start()
                 for image in loadList:
-                    if image.state <= STATE_LOADING:
+                    if image.state == STATE_INIT:
                         image.createCache(self.options)
                     break # check for a new list
         
         
+def _centerRange(start, center, stop):
+    """This generator returns all numbers from *start* to *stop*-1. It returns these numbers ordered by their
+    distance to *center*, starting with *center*.
+    """
+    yield center
+    i = 1
+    while center-i >= start or center+i < stop:
+        if center-i >= start:
+            yield center-i
+        if center+i < stop:
+            yield center+i
+        i += 1
+        
+
 class ConfigWidget(QtGui.QWidget):
     """Widget that allows to configure a ImageFlowWidget. Not all options can be accessed via the GUI."""
     def __init__(self, imageFlow, parent=None):
