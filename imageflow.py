@@ -15,7 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-import math, functools, threading, queue
+import math, functools, threading
 
 from PyQt4 import QtCore, QtGui, QtSvg
 from PyQt4.QtCore import Qt
@@ -448,10 +448,7 @@ class Renderer:
         if self.widget.worker is not None:
             self._frame = 0
             self._loadingAnim = QtGui.QPixmap('process-working.png')
-            self.timer = QtCore.QTimer()
-            self.timer.setInterval(50)
-            self.timer.timeout.connect(self._handleTimer)
-            self.timer.start()
+            self.widget.worker.timer.timeout.connect(self._handleTimer)
     
     def init(self):
         """Initialize the internal buffer. Call this whenever the widget's size has changed."""
@@ -778,10 +775,12 @@ class Worker(threading.Thread):
         super().__init__()
         self.daemon = True
         self.options = options
-        self._newEvent = threading.Event()
-        self._emptyEvent = None
-        self._loadList = []
+        self.timer = QtCore.QTimer()
+        self.timer.setInterval(50)
         self._running = True
+        self._newEvent = threading.Event() # wakes up the worker thread if something happens
+        self._emptyEvent = None # is used to wait on the worker thread to finish
+        self._loadList = []
     
     def load(self, images):
         self._loadList = images
@@ -794,6 +793,7 @@ class Worker(threading.Thread):
         self._emptyEvent = None
                 
     def shutdown(self):
+        self.timer.stop()
         self._running = False
         self._newEvent.set()
         
@@ -801,11 +801,14 @@ class Worker(threading.Thread):
         while self._running:
             loadList = self._loadList
             if len(loadList) == 0:
+                self.timer.stop()
                 if self._emptyEvent is not None:
                     self._emptyEvent.set()
                 self._newEvent.wait()
                 self._newEvent.clear()
             else:
+                if not self.timer.isActive():
+                    self.timer.start()
                 for image in loadList:
                     if image.state <= STATE_LOADING:
                         image.createCache(self.options)
