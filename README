@@ -1,0 +1,21 @@
+README
+============
+This is an easy to use and highly configurable image flow for PyQt. 
+To use it, simply create an imageflow.ImageFlowWidget and add it to your layout. To configure the image flow have a look at the available options at the top of imageflow.py and use setOption(s).
+
+This script is copyright of Martin Altmayer <martin.altmayer@web.de> and licensed under the GPL v3 (confer the file LICENSE).
+
+
+
+DEVELOPMENT
+=============
+To contribute in development, get the current HEAD from the git repository:
+
+git clone https://github.com/MartinAltmayer/imageflow.git
+
+Send patches and ideas to <martin.altmayer@web.de>.
+
+
+ATTRIBUTIONS
+==============
+The image flow script uses process-working.png from the Tango project (http://tango.freedesktop.org/).
