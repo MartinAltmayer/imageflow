@@ -110,11 +110,6 @@ class Image:
         self.path = path
         assert pixmap is None
         self.state = STATE_INIT
-        #if self.pixmap is None:
-            #self.state = STATE_INIT
-        #elif self.pixmap.isNull():
-            #self.state = STATE_FAILED
-        #else: self.state = STATE_READY
         self.text = text
         self.image = None
         self._cache = None
@@ -202,7 +197,7 @@ class ImageFlowWidget(QtGui.QWidget):
     imagePressed = QtCore.pyqtSignal(Image)
     imageDblClicked = QtCore.pyqtSignal(Image)
     
-    def __init__(self, data=None, parent=None):
+    def __init__(self, data=None, loadAsync=True, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
@@ -216,8 +211,10 @@ class ImageFlowWidget(QtGui.QWidget):
         
         self.renderer = Renderer(self)
         self.animator = Animator(self)
-        self.worker = Worker(self._o)
-        self.worker.start()
+        if loadAsync:
+            self.worker = Worker(self._o)
+            self.worker.start()
+        else: self.worker = None
         self.clear() # initialize
      
     def option(self, key):
@@ -248,7 +245,8 @@ class ImageFlowWidget(QtGui.QWidget):
                 self._o[key] = value
                 changed.append(key)
         if any(k in OPTIONS_REBUILD_CACHE for k in changed):
-            self.worker.reset()
+            if self.worker is not None:
+                self.worker.reset()
             for image in self.images:
                 image._clearCache()
         if len(changed):
@@ -428,7 +426,7 @@ class ImageFlowWidget(QtGui.QWidget):
         
     def closeEvent(self, event):
         super().closeEvent(event)
-        if event.isAccepted():
+        if event.isAccepted() and self.worker is not None:
             self.worker.shutdown()
             
             
@@ -592,8 +590,9 @@ class Renderer:
         
         image = self.widget.images[index]
         if image.state == STATE_INIT:
-            #TODO if threading
-            self.widget.worker.submit(image)
+            if self.widget.worker is not None:
+                self.widget.worker.submit(image)
+            else: image.createCache(o)
         
         if index == self.widget.position(): # central image; the if is necessary if o['imagesPerSide']=0
             lx = 0
