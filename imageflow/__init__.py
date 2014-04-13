@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # PyQt ImageFlow
-# Copyright (C) 2013-2014 Martin Altmayer <altmayer@posteo.de>
+# Copyright (C) 2013-2014 Martin Altmayer <martin.altmayer@web.de>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -213,6 +213,8 @@ class ImageFlowWidget(QtGui.QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setFocusPolicy(Qt.WheelFocus)
         
+        self.renderer = self.animator = self.worker = None
+        
         self.images = []
         self._pos = 0     
         self._o = {option: default for option, (optionType, default, _) in OPTIONS.items()}
@@ -222,7 +224,6 @@ class ImageFlowWidget(QtGui.QWidget):
         if loadAsync:
             self.worker = Worker(self._o) # use the same dict, so worker always uses current options
             self.worker.start()
-        else: self.worker = None
         self.renderer = Renderer(self)
         self.animator = Animator(self)
         self.clear() # initialize
@@ -259,7 +260,7 @@ class ImageFlowWidget(QtGui.QWidget):
                 self.worker.reset()
             for image in self.images:
                 image._clearCache()
-        if len(changed) and hasattr(self, 'renderer'): # the second condition is necessary for __init__
+        if len(changed) and self.renderer is not None:
             self.triggerRender()
     
     def saveData(self):

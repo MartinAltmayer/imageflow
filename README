@@ -1,21 +1,55 @@
 README
 ============
 This is an easy to use and highly configurable image flow for PyQt. 
-To use it, simply create an imageflow.ImageFlowWidget and add it to your layout. To configure the image flow have a look at the available options at the top of imageflow.py and use setOption(s).
+Features:
 
-This script is copyright of Martin Altmayer <martin.altmayer@web.de> and licensed under the GPL v3 (confer the file LICENSE).
+- Reflection
+- Fading out of images to the sides
+- Images are loaded and scaled in a separate thread,
+  so the animation is always smooth.
+- 5 different curves on which the images can flow.
+- Detect image orientation from exif data
+  (requires the Wand library from www.wand-py.org).
+- Configurable: Disable all features that you don't want.
+- Pure Python 3 and PyQt
+
+To test the imageflow, download and extract the zip-file from
+https://github.com/MartinAltmayer/ImageFlow/
+and use
+python3 imageflow/__init__.py  <folder with images>
+Try also 
+python3 imageflow/__init__.py  --help
+
+
+To use the image flow in a PyQt-application, simply create an
+imageflow.ImageFlowWidget
+and add it to your layout. To configure the image flow have a look at the
+available options at the top of imageflow/__init__.py and use setOption(s).
+
+This package is copyright of Martin Altmayer <martin.altmayer@web.de>
+and licensed under the GPL v3 or later (confer the file LICENSE).
+
+
+INSTALLATION
+=============
+Download and extract zip-file from
+https://github.com/MartinAltmayer/ImageFlow/
+Change into the extracted directory.
+Type 
+sudo python3 setup.py install
+or, to install without root permissions,
+python3 setup.py install --user
 
 
 
 DEVELOPMENT
 =============
 To contribute in development, get the current HEAD from the git repository:
-
 git clone https://github.com/MartinAltmayer/imageflow.git
-
 Send patches and ideas to <martin.altmayer@web.de>.
 
 
 ATTRIBUTIONS
 ==============
-The image flow script uses process-working.png from the Tango project (http://tango.freedesktop.org/).
+The image flow script uses process-working.png from the Tango project
+(http://tango.freedesktop.org/).
